@@ -7,10 +7,12 @@ struct ContentView: View {
     var body: some View {
         VStack(spacing: 0) {
             TabBarView()
-            Divider()
+            ChromeHairline()
             terminalArea
         }
         .frame(minWidth: 760, minHeight: 460)
+        // 拖拽提示要能盖住 tab 条和终端区，所以叠在最外层。
+        .overlay(DropIndicatorOverlay())
         .navigationTitle(appState.windowTitle)
         .sheet(isPresented: $appState.isHostManagerPresented) {
             HostManagerView()
@@ -22,37 +24,47 @@ struct ContentView: View {
         ZStack {
             Color(nsColor: .textBackgroundColor)
 
-            if appState.sessions.isEmpty {
+            if appState.tabs.isEmpty {
                 EmptyStateView()
             }
 
-            // 所有会话的终端视图**都留在层级里**，只用透明度决定谁可见。
+            // 所有 tab 的分栏树**都留在层级里**，只用透明度决定谁可见。
             // 用 if/else 切换会销毁 NSView，从而杀掉 PTY —— 那样切 tab 就断线了。
-            ForEach(appState.sessions) { session in
-                let isSelected = session.id == appState.selectedSessionID
-                TerminalContainer(session: session)
+            ForEach(appState.tabs) { tab in
+                let isSelected = tab.id == appState.selectedTabID
+                PaneTreeView(tab: tab, isActive: isSelected)
                     .opacity(isSelected ? 1 : 0)
                     .allowsHitTesting(isSelected)
                     .zIndex(isSelected ? 1 : 0)
             }
         }
+        // 可见 tab 的各分栏矩形与小标签条，拖拽落点判定要用。
+        .onPreferenceChange(PaneFramesKey.self) { frames in
+            appState.drag.paneFrames = frames
+        }
+        .onPreferenceChange(PaneHeadersKey.self) { headers in
+            appState.drag.paneHeaders = headers
+        }
         .sheet(item: $appState.hostBeingEdited) { host in
             HostEditorView(host: host)
                 .environmentObject(appState)
         }
-        .onChange(of: appState.selectedSessionID) { _ in
-            focusSelectedTerminal()
+        .onChange(of: appState.selectedTabID) { _ in
+            focusTerminal()
+        }
+        .onChange(of: appState.selectedTab?.focusedSessionID) { _ in
+            focusTerminal()
         }
         .onAppear {
-            focusSelectedTerminal()
+            focusTerminal()
         }
     }
 
-    /// 切 tab 后把键盘焦点交给当前终端，否则输入会落到别处。
-    private func focusSelectedTerminal() {
-        guard let view = appState.selectedSession?.terminalView else { return }
+    /// 切 tab / 切分栏后把键盘焦点交给当前终端，否则输入会落到别处。
+    private func focusTerminal() {
+        guard let session = appState.focusedSession else { return }
         DispatchQueue.main.async {
-            view.window?.makeFirstResponder(view)
+            session.takeKeyboardFocus()
         }
     }
 }

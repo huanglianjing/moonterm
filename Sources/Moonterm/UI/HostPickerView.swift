@@ -1,6 +1,9 @@
+import MoontermCore
 import SwiftUI
 
 /// tab 条上 `+` 号的弹出层：选一台已保存的主机开新 tab。
+///
+/// 只有「新建 tab」会走到这里 —— tab 内部分栏一律沿用该 tab 绑定的主机，不再选。
 struct HostPickerView: View {
 
     @EnvironmentObject private var appState: AppState
@@ -14,8 +17,7 @@ struct HostPickerView: View {
             } else {
                 ForEach(appState.configStore.hosts) { host in
                     Button {
-                        appState.isHostPickerPresented = false
-                        appState.open(host: host)
+                        open(host)
                     } label: {
                         HStack {
                             VStack(alignment: .leading, spacing: 1) {
@@ -35,18 +37,27 @@ struct HostPickerView: View {
             Divider()
 
             Button("新建主机…") {
-                appState.isHostPickerPresented = false
+                dismiss()
                 appState.beginCreatingHost()
             }
             .buttonStyle(.plain)
 
             Button("管理主机…") {
-                appState.isHostPickerPresented = false
+                dismiss()
                 appState.isHostManagerPresented = true
             }
             .buttonStyle(.plain)
         }
         .padding(12)
         .frame(width: 260)
+    }
+
+    private func open(_ host: HostConfig) {
+        dismiss()
+        appState.open(host: host)
+    }
+
+    private func dismiss() {
+        appState.isHostPickerPresented = false
     }
 }

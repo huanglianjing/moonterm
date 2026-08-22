@@ -50,9 +50,6 @@ final class SSHSession: NSObject, ObservableObject, Identifiable, LocalProcessTe
     /// 远端通过 OSC 设置的标题（用于窗口标题栏）。
     @Published private(set) var remoteTitle: String?
 
-    /// tab 上显示的名字：始终用用户认得的主机名，保证稳定。
-    var tabTitle: String { config.displayName }
-
     let terminalView: SSHTerminalView
 
     // MARK: - 内部
@@ -83,6 +80,12 @@ final class SSHSession: NSObject, ObservableObject, Identifiable, LocalProcessTe
         terminalView.onReadyForProcess = { [weak self] in
             self?.launchIfNeeded()
         }
+    }
+
+    /// 把键盘焦点交给这个终端（切 tab、⌥⌘方向键切分栏时用）。
+    func takeKeyboardFocus() {
+        guard let window = terminalView.window else { return }
+        window.makeFirstResponder(terminalView)
     }
 
     // MARK: - 启停

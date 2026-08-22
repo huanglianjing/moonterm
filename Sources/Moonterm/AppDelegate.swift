@@ -6,6 +6,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     weak var appState: AppState?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // 终端底色是固定的黑，外壳（标题栏 / tab 条 / 弹窗）也固定走深色，别出现黑白拼接。
+        ChromeStyle.applyDarkAppearance()
+
         // SwiftUI 的菜单在启动流程里组装，下一轮 runloop 再改才稳。
         DispatchQueue.main.async {
             MenuCustomizer.relocateCloseWindowShortcut()

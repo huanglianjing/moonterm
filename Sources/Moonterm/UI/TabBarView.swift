@@ -1,30 +1,33 @@
+import MoontermCore
 import SwiftUI
 
-/// 顶部 tab 条。
+/// 顶部 tab 条。一项 = 一台主机的一个 tab（里面可能有多个分栏）。
+/// 这里唯一的拖拽语义是**排序**：tab 之间不合并，也不能拖进别的 tab 的分栏里。
 struct TabBarView: View {
 
     @EnvironmentObject private var appState: AppState
+    @EnvironmentObject private var drag: DragController
 
     var body: some View {
         HStack(spacing: 0) {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 1) {
-                    ForEach(appState.sessions) { session in
+                    ForEach(appState.tabs) { tab in
                         TabItemView(
-                            session: session,
-                            isSelected: session.id == appState.selectedSessionID,
-                            onSelect: { appState.selectedSessionID = session.id },
-                            onClose: { appState.close(sessionID: session.id) },
-                            onReconnect: { session.reconnect() },
-                            onCloseOthers: { appState.closeOthers(keeping: session.id) }
+                            tab: tab,
+                            statusColor: SessionStatus.aggregateColor(of: appState.sessions(in: tab).map { $0.state }),
+                            isSelected: tab.id == appState.selectedTabID,
+                            isDragging: drag.isDragging(.tab(id: tab.id))
                         )
+                        .reportFrame(TabFramesKey.self) { [DragController.TabFrame(id: tab.id, rect: $0)] }
                     }
                 }
                 .padding(.horizontal, 4)
             }
 
-            Divider()
-                .frame(height: 22)
+            Rectangle()
+                .fill(ChromeStyle.hairline)
+                .frame(width: 1, height: 22)
 
             Button {
                 appState.isHostPickerPresented = true
@@ -40,19 +43,27 @@ struct TabBarView: View {
             }
         }
         .frame(height: 32)
-        .background(.bar)
+        .background(ChromeStyle.bar)
+        .reportFrame(TabBarFrameKey.self) { $0 }
+        // 拖拽落点判定要用的几何信息。
+        .onPreferenceChange(TabFramesKey.self) { frames in
+            drag.tabFrames = frames.sorted { $0.rect.minX < $1.rect.minX }
+        }
+        .onPreferenceChange(TabBarFrameKey.self) { frame in
+            drag.tabBarFrame = frame
+        }
     }
 }
 
 /// 单个 tab。
 private struct TabItemView: View {
 
-    @ObservedObject var session: SSHSession
+    @EnvironmentObject private var appState: AppState
+
+    let tab: TerminalTab
+    let statusColor: Color
     let isSelected: Bool
-    let onSelect: () -> Void
-    let onClose: () -> Void
-    let onReconnect: () -> Void
-    let onCloseOthers: () -> Void
+    let isDragging: Bool
 
     @State private var isHovering = false
 
@@ -62,19 +73,29 @@ private struct TabItemView: View {
                 .fill(statusColor)
                 .frame(width: 7, height: 7)
 
-            Text(session.tabTitle)
+            Text(tab.title)
                 .font(.system(size: 12))
                 .lineLimit(1)
                 .truncationMode(.middle)
 
-            Button(action: onClose) {
+            // 里面装了不止一个窗口就给个提示，标题始终是主机名。
+            if tab.sessionCount > 1 {
+                Image(systemName: tab.paneCount > 1 ? "rectangle.split.2x1" : "square.on.square")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+                    .help("\(tab.sessionCount) 个窗口 · \(tab.paneCount) 个分栏")
+            }
+
+            Button {
+                appState.close(tabID: tab.id)
+            } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 8, weight: .bold))
                     .frame(width: 14, height: 14)
             }
             .buttonStyle(.plain)
             .opacity(isHovering || isSelected ? 1 : 0)
-            .help("关闭标签页（⌘W）")
+            .help("关闭标签页")
         }
         .padding(.horizontal, 8)
         .frame(height: 26)
@@ -83,29 +104,42 @@ private struct TabItemView: View {
             RoundedRectangle(cornerRadius: 5)
                 .fill(background)
         )
+        .opacity(isDragging ? 0.4 : 1)
         .contentShape(Rectangle())
-        .onTapGesture(perform: onSelect)
+        .onTapGesture { appState.selectedTabID = tab.id }
         .onHover { isHovering = $0 }
-        .help("\(session.config.endpointDescription) — \(session.state.label)")
-        .contextMenu {
-            Button("重新连接", action: onReconnect)
-            Divider()
-            Button("关闭标签页", action: onClose)
-            Button("关闭其他标签页", action: onCloseOthers)
+        .paneDrag(
+            appState.drag,
+            payload: .tab(id: tab.id),
+            title: tab.title
+        ) {
+            appState.completeDrag()
         }
+        .help(helpText)
+        .contextMenu {
+            Button(tab.sessionCount > 1 ? "重新连接全部窗口" : "重新连接") {
+                appState.sessions(in: tab).forEach { $0.reconnect() }
+            }
+            Divider()
+            Button("关闭标签页") { appState.close(tabID: tab.id) }
+            Button("关闭其他标签页") { appState.closeOtherTabs(keeping: tab.id) }
+        }
+    }
+
+    private var helpText: String {
+        let sessions = appState.sessions(in: tab)
+        let endpoint = tab.host.endpointDescription
+        if sessions.count == 1, let session = sessions.first {
+            return "\(endpoint) — \(session.state.label)（拖动可重排）"
+        }
+        let windows = sessions
+            .map { "\(tab.windowName(of: $0.id)) — \($0.state.label)" }
+            .joined(separator: "\n")
+        return "\(endpoint)\n\(windows)"
     }
 
     private var background: Color {
-        if isSelected { return Color(nsColor: .controlAccentColor).opacity(0.18) }
-        return isHovering ? Color.primary.opacity(0.06) : .clear
-    }
-
-    private var statusColor: Color {
-        switch session.state {
-        case .connecting: return .orange
-        case .connected: return .green
-        case .disconnected: return .secondary
-        case .failed: return .red
-        }
+        if isSelected { return ChromeStyle.selected(emphasized: false) }
+        return isHovering ? ChromeStyle.hover : .clear
     }
 }
