@@ -5,10 +5,18 @@ struct ContentView: View {
     @EnvironmentObject private var appState: AppState
 
     var body: some View {
-        VStack(spacing: 0) {
-            TabBarView()
-            ChromeHairline()
-            terminalArea
+        // 左边两条竖的（常驻竖栏 + 展开的面板）都占布局空间，展开时终端区被挤窄。
+        HStack(spacing: 0) {
+            ActivityBarView()
+            ChromeVerticalHairline()
+
+            sidebar
+
+            VStack(spacing: 0) {
+                TabBarView()
+                ChromeHairline()
+                terminalArea
+            }
         }
         .frame(minWidth: 760, minHeight: 460)
         // 拖拽提示要能盖住 tab 条和终端区，所以叠在最外层。
@@ -17,6 +25,27 @@ struct ContentView: View {
         .sheet(isPresented: $appState.isHostManagerPresented) {
             HostManagerView()
                 .environmentObject(appState)
+        }
+        // 新建/编辑主机是从侧栏发起的，所以挂在最外层，不跟着终端区走。
+        .sheet(item: $appState.hostBeingEdited) { host in
+            HostEditorView(host: host)
+                .environmentObject(appState)
+        }
+    }
+
+    /// 竖栏展开的那块面板，外加右边缘那条可拖的把手。
+    @ViewBuilder
+    private var sidebar: some View {
+        if let panel = appState.activeSidebar {
+            Group {
+                switch panel {
+                case .hosts:
+                    HostSidebarView()
+                }
+            }
+            .frame(width: appState.sidebarWidth)
+
+            SidebarResizeHandle()
         }
     }
 
@@ -45,10 +74,6 @@ struct ContentView: View {
         .onPreferenceChange(PaneHeadersKey.self) { headers in
             appState.drag.paneHeaders = headers
         }
-        .sheet(item: $appState.hostBeingEdited) { host in
-            HostEditorView(host: host)
-                .environmentObject(appState)
-        }
         .onChange(of: appState.selectedTabID) { _ in
             focusTerminal()
         }
@@ -64,18 +89,20 @@ struct ContentView: View {
     private func focusTerminal() {
         guard let session = appState.focusedSession else { return }
         DispatchQueue.main.async {
+            // 正在改分栏名字时别抢：焦点得留在那个输入框里。
+            guard appState.sessionBeingRenamed == nil else { return }
             session.takeKeyboardFocus()
         }
     }
 }
 
-/// 没有任何 tab 时的界面：直接把已保存的主机列出来，点一下就连。
+/// 没有任何 tab 时的占位提示。
+///
+/// 只是一句话 —— 主机列表在左侧竖栏的面板里，中间不再放第二份。
 private struct EmptyStateView: View {
 
-    @EnvironmentObject private var appState: AppState
-
     var body: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: 10) {
             Image(systemName: "terminal")
                 .font(.system(size: 40, weight: .light))
                 .foregroundStyle(.secondary)
@@ -83,40 +110,9 @@ private struct EmptyStateView: View {
             Text("Moonterm")
                 .font(.title2)
 
-            if appState.configStore.hosts.isEmpty {
-                Text("还没有保存任何主机")
-                    .foregroundStyle(.secondary)
-            } else {
-                VStack(spacing: 4) {
-                    ForEach(appState.configStore.hosts) { host in
-                        Button {
-                            appState.open(host: host)
-                        } label: {
-                            HStack {
-                                Text(host.displayName)
-                                Spacer()
-                                Text(host.endpointDescription)
-                                    .foregroundStyle(.secondary)
-                                    .font(.system(size: 11))
-                            }
-                            .padding(.vertical, 5)
-                            .padding(.horizontal, 10)
-                            .frame(width: 380, alignment: .leading)
-                            .background(
-                                RoundedRectangle(cornerRadius: 6)
-                                    .fill(Color.primary.opacity(0.06))
-                            )
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .frame(maxHeight: 240)
-            }
-
-            HStack(spacing: 10) {
-                Button("新建主机…") { appState.beginCreatingHost() }
-                Button("管理主机…") { appState.isHostManagerPresented = true }
-            }
+            Text("在左边的主机列表里双击一台开始")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
         }
         .padding(32)
     }

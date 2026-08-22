@@ -4,15 +4,22 @@ macOS 原生 SSH 客户端。Swift + SwiftUI + AppKit，顶部多 tab，同时�
 
 ## 功能
 
+- 最左边一条常驻**功能竖栏**（类似 VS Code）：目前一个图标 —— 主机。点开在右边展开主机面板，**占布局空间**（终端跟着被挤窄并 reflow），再点收起，`⌘B` 也能开关；边缘可拖着改宽度，宽度与开合状态都记住
+  - 主机面板里**单击选中、双击连接**（每次双击都是一个新 tab，同一台开好几个也行）；`⌘` 点单独加减、`⇧` 点整段扩选，右键菜单可**批量连接或删除**选中的那几台
+  - 单选时右键菜单还有编辑 / 复制 / 删除；面板顶部的 `+` 新建主机
+  - 选主机只有这一处：tab 条上没有 `+`，`⌘T` 就是把这个面板展开
 - 顶部 tab，多台设备同时连接；**切换 tab 不断线**（终端视图常驻，PTY 不销毁）
 - **一个 tab 固定一台主机**：tab 标题就是主机名，tab 里所有分栏都是这台主机
-  - tab 条上只能**拖动排序**；tab 之间不合并，也不能拖进别的 tab 的分栏里
+  - tab 条上只能**拖动排序**：被拖的 tab 跟着指针走，其余的实时滑开让位（不画插入线）；tab 之间不合并，也不能拖进别的 tab 的分栏里
   - 每个分栏顶部都有一条**标题栏**：新建 tab 时那个全屏分栏就叫「窗口1」，之后新建的是「窗口2」「窗口3」…（关掉的编号会被回收复用）
+  - 分栏可以**改名**：双击小标签（或右键「重命名…」、`⇧⌘R`）就地编辑，回车确认、Esc 取消、清空恢复「窗口N」
   - 分栏与新建窗口都只发生在当前 tab 内：`⌘D` / `⇧⌘D` 分栏、标题栏右侧的 `+` 在本分栏里再叠一个窗口，一律用本 tab 的主机，不再问选哪台
   - 拖窗口小标签在本 tab 内重新布局：落在分栏边缘 = 开新分栏；落在正中或落在标题栏上 = 并进那个分栏，多一个小标签
-  - 拖分割线调整比例；当前分栏有强调色边框
+  - 拖分割线调整比例；当前分栏有一圈暗蓝色边框（拖拽时的落点框用同一个暗蓝）
+  - tab 和窗口小标签上**按中键即关闭**（等于点那个 ✕）
 - 主机配置：名称 / 地址 / 端口 / 用户名 / 密码，本地持久化
 - 完整终端体验：VT/xterm 仿真、真彩色、鼠标上报、滚动缓冲、选区复制粘贴（基于 [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm)）
+- 终端里**选中即复制、右键即粘贴**（⌘C / ⌘V 照旧可用）
 - 断线有明确提示与失败原因（认证失败 / 端口不通 / 主机密钥变更 …），⌘R 重连
 - 字号调整并记住设置
 
@@ -20,17 +27,19 @@ macOS 原生 SSH 客户端。Swift + SwiftUI + AppKit，顶部多 tab，同时�
 
 | 快捷键 | 作用 |
 |---|---|
-| `⌘T` | 新建连接（选主机 → 新 tab） |
+| `⌘T` | 新建连接（展开左侧主机面板，点一台就连） |
+| `⌘B` | 显示 / 隐藏主机面板 |
 | `⌥⌘T` | 在当前分栏新建窗口（同主机，多一个小标签） |
 | `⌘W` | 关闭当前窗口（tab 里只有一个时就是关闭标签页） |
 | `⇧⌘W` | 关闭 App 窗口（系统菜单项，被挪到这里给 `⌘W` 腾位置） |
 | `⌘R` | 重新连接（当前分栏） |
+| `⇧⌘R` | 重命名当前分栏 |
 | `⌘D` / `⇧⌘D` | 左右分栏 / 上下分栏（同主机，直接开） |
 | `⌥⌘←` `⌥⌘→` `⌥⌘↑` `⌥⌘↓` | 在分栏间移动焦点 |
 | `⇧⌘]` / `⇧⌘[` | 下一个 / 上一个标签页 |
 | `⌘1` … `⌘9` | 跳到第 N 个标签页 |
 | `⌘+` / `⌘-` / `⌘0` | 放大 / 缩小 / 恢复字号 |
-| `⌘,` | 主机管理 |
+| `⌘,` | 主机管理面板（排序、批量管理这些低频操作） |
 
 ## 构建
 
@@ -94,6 +103,7 @@ AppKit 会把后续鼠标事件继续投给起点视图，指针移到终端上�
 ```
 Sources/MoontermCore/         纯逻辑，无 UI 依赖，有单测覆盖
   Models/HostConfig.swift     主机配置模型与校验
+  Models/HostSelection.swift  主机列表的多选语义（重选 / ⌘ 加减 / ⇧ 扩选 / 右键作用范围）
   Models/PaneLayout.swift     分栏树（分栏增删移、组内并入/切换、占比）与落点判定
   Models/TerminalTab.swift    一个 tab = 一台主机 + 分栏树 + 窗口编号 + 聚焦的会话
   Store/ConfigStore.swift     配置持久化（原子写 + 0600）
@@ -104,15 +114,18 @@ Sources/MoontermCore/         纯逻辑，无 UI 依赖，有单测覆盖
 
 Sources/Moonterm/             App 本体
   MoontermApp.swift           入口
-  AppState.swift              会话、tab 列表、选中与聚焦、字号
+  AppState.swift              会话、tab 列表、选中与聚焦、字号、侧栏开合与宽度
   AppCommands.swift           菜单与快捷键
   AppDelegate.swift           菜单快捷键微调、退出前收尾
-  SSH/SSHTerminalView.swift   LocalProcessTerminalView 子类
+  SSH/SSHTerminalView.swift   LocalProcessTerminalView 子类（选中即复制、右键即粘贴）
   SSH/SSHSession.swift        单个会话的状态机
   SSH/TerminalFocusMonitor.swift  点终端就聚焦所在分栏（窗口级鼠标监听）
+  UI/ActivityBarView.swift    最左侧功能竖栏与它上面的图标（SidebarPanel 枚举在这里）
+  UI/HostSidebarView.swift    竖栏展开的主机面板（点一台即连）+ 可拖的宽度把手
   UI/PaneTreeView.swift       分栏树渲染、分割线、分栏标题栏（窗口小标签 + 新建）
   UI/DragController.swift     拖拽状态与落点判定
   UI/DropIndicatorOverlay.swift  拖拽时的落点高亮与幽灵
+  UI/ClickCatcher.swift       中键点击、带修饰键与点击次数的左键点击（回 AppKit 接）
   UI/                         tab 条、终端容器、主机管理与编辑
 
 Sources/MoontermAskpass/      SSH_ASKPASS 助手（独立可执行文件）

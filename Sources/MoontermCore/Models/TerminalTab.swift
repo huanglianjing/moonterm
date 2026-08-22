@@ -20,6 +20,9 @@ public struct TerminalTab: Identifiable, Equatable {
     /// 编号在本 tab 内唯一；窗口关掉后编号会被释放，下次新建补最小空缺。
     private var windowNumbers: [UUID: Int]
 
+    /// 用户改过的分栏名，按会话 id 索引。没改过的不在这里，显示默认的「窗口N」。
+    private var customNames: [UUID: String] = [:]
+
     public init(id: UUID = UUID(), host: HostConfig, sessionID: UUID) {
         self.id = id
         self.host = host
@@ -56,18 +59,47 @@ public struct TerminalTab: Identifiable, Equatable {
     }
 
     /// 窗口关掉后把编号释放出来，让下次新建能补上这个空缺。
+    /// 自定义名字一起忘掉 —— 编号被复用时不能把上一个窗口的名字带过来。
     public mutating func releaseWindowNumber(of sessionID: UUID) {
         windowNumbers.removeValue(forKey: sessionID)
+        customNames.removeValue(forKey: sessionID)
     }
 
     public func windowNumber(of sessionID: UUID) -> Int? {
         windowNumbers[sessionID]
     }
 
-    /// 分栏小标签上显示的名字。没登记过编号（理论上不会）时按视觉顺序兜底，不至于没名字。
-    public func windowName(of sessionID: UUID) -> String {
+    // MARK: - 重命名
+
+    /// 给分栏改名。首尾空白会去掉；改成空字符串等于恢复默认的「窗口N」。
+    /// 名字太长会把小标签撑得很难看，所以在模型层就截断。
+    public mutating func rename(sessionID: UUID, to name: String) {
+        guard contains(sessionID: sessionID) else { return }
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            customNames.removeValue(forKey: sessionID)
+        } else {
+            customNames[sessionID] = String(trimmed.prefix(Self.maximumNameLength))
+        }
+    }
+
+    /// 用户改过的名字，没改过返回 nil（此时显示默认的「窗口N」）。
+    public func customName(of sessionID: UUID) -> String? {
+        customNames[sessionID]
+    }
+
+    /// 默认名字：「窗口N」。没登记过编号（理论上不会）时按视觉顺序兜底，不至于没名字。
+    public func defaultWindowName(of sessionID: UUID) -> String {
         if let number = windowNumbers[sessionID] { return "窗口\(number)" }
         let fallback = (sessionIDs.firstIndex(of: sessionID) ?? 0) + 1
         return "窗口\(fallback)"
     }
+
+    /// 分栏小标签上显示的名字：改过就用改过的，否则是「窗口N」。
+    public func windowName(of sessionID: UUID) -> String {
+        customNames[sessionID] ?? defaultWindowName(of: sessionID)
+    }
+
+    /// 分栏名字的长度上限（字符数）。小标签宽度跟着名字走，太长会把标签条挤满。
+    public static let maximumNameLength = 24
 }

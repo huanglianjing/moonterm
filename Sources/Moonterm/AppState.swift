@@ -28,14 +28,33 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// 主机管理面板。
+    /// 主机管理面板（⌘,）：排序、批量管理这些低频操作。日常连接走左侧竖栏的主机面板。
     @Published var isHostManagerPresented = false
     /// 正在编辑的主机（nil 表示没在编辑）。
     @Published var hostBeingEdited: HostConfig?
-    /// 新建连接的选择器（tab 条上的 + 号）。只用于新建 tab —— 分栏不再需要选主机。
-    @Published var isHostPickerPresented = false
+    /// 正在重命名的分栏（nil 表示没在重命名）。它的小标签会变成输入框。
+    @Published private(set) var sessionBeingRenamed: UUID?
+
+    /// 左侧竖栏当前展开的面板，nil = 收起（只留那条窄竖栏）。记在 UserDefaults 里，下次打开照旧。
+    @Published var activeSidebar: SidebarPanel? {
+        didSet {
+            // 空串表示「用户主动收起的」，和「从没设置过」区分开：首次启动默认展开主机面板。
+            UserDefaults.standard.set(activeSidebar?.rawValue ?? "", forKey: Self.sidebarPanelKey)
+        }
+    }
+
+    /// 展开面板的宽度，可拖右边缘调整。
+    @Published private(set) var sidebarWidth: CGFloat {
+        didSet { UserDefaults.standard.set(Double(sidebarWidth), forKey: Self.sidebarWidthKey) }
+    }
+
+    static let minimumSidebarWidth: CGFloat = 160
+    static let maximumSidebarWidth: CGFloat = 420
+    static let defaultSidebarWidth: CGFloat = 220
 
     private static let fontSizeKey = "terminalFontSize"
+    private static let sidebarPanelKey = "activeSidebarPanel"
+    private static let sidebarWidthKey = "sidebarWidth"
     private var sessionObservations: [UUID: AnyCancellable] = [:]
     private var cancellables: Set<AnyCancellable> = []
     private let focusMonitor = TerminalFocusMonitor()
@@ -44,6 +63,17 @@ final class AppState: ObservableObject {
         self.configStore = configStore
         let saved = UserDefaults.standard.double(forKey: Self.fontSizeKey)
         self.fontSize = saved > 0 ? CGFloat(saved) : AppFont.defaultSize
+
+        // 没存过 = 首次启动：把主机面板先展开，不然新用户看不到从哪儿开始。
+        if let stored = UserDefaults.standard.string(forKey: Self.sidebarPanelKey) {
+            self.activeSidebar = SidebarPanel(rawValue: stored)
+        } else {
+            self.activeSidebar = .hosts
+        }
+        let storedWidth = UserDefaults.standard.double(forKey: Self.sidebarWidthKey)
+        self.sidebarWidth = storedWidth > 0
+            ? min(max(CGFloat(storedWidth), Self.minimumSidebarWidth), Self.maximumSidebarWidth)
+            : Self.defaultSidebarWidth
 
         // 主机列表变化也要驱动界面重绘（视图只观察 AppState 一个对象）。
         configStore.objectWillChange
@@ -242,6 +272,7 @@ final class AppState: ObservableObject {
         sessions.removeAll()
         tabs.removeAll()
         selectedTabID = nil
+        sessionBeingRenamed = nil
     }
 
     func reconnectFocused() {
@@ -250,6 +281,7 @@ final class AppState: ObservableObject {
 
     /// 终止会话并从注册表里移除（**不动**分栏树）。
     private func destroySession(_ sessionID: UUID) {
+        endRenaming(sessionID: sessionID)
         session(id: sessionID)?.close()
         sessionObservations.removeValue(forKey: sessionID)
         sessions.removeAll { $0.id == sessionID }
@@ -430,6 +462,50 @@ final class AppState: ObservableObject {
         addWindow(toPaneOf: tab.focusedSessionID)
     }
 
+    // MARK: - 重命名分栏
+
+    /// 让某个分栏的小标签进入输入态。顺手把焦点挪过去，免得在看不见的分栏上改名。
+    func beginRenaming(sessionID: UUID) {
+        guard tabs.contains(where: { $0.contains(sessionID: sessionID) }) else { return }
+        focus(sessionID: sessionID)
+        sessionBeingRenamed = sessionID
+    }
+
+    /// 菜单里的「重命名分栏…」：改当前聚焦的那个。
+    func beginRenamingFocusedSession() {
+        guard let tab = selectedTab else { return }
+        beginRenaming(sessionID: tab.focusedSessionID)
+    }
+
+    /// 提交新名字并收起输入框。空名字表示恢复默认的「窗口N」。
+    func rename(sessionID: UUID, to name: String) {
+        if let index = tabs.firstIndex(where: { $0.contains(sessionID: sessionID) }) {
+            tabs[index].rename(sessionID: sessionID, to: name)
+        }
+        finishRenaming(sessionID: sessionID)
+    }
+
+    /// 放弃重命名（Esc）。
+    func cancelRenaming(sessionID: UUID) {
+        finishRenaming(sessionID: sessionID)
+    }
+
+    /// 输入框没了就得有人接住键盘焦点，否则输入既进不了终端也没处可去。
+    private func finishRenaming(sessionID: UUID) {
+        endRenaming(sessionID: sessionID)
+        guard selectedTab?.focusedSessionID == sessionID else { return }
+        // 等输入框先从视图层级里撤掉，再把 first responder 交回终端。
+        DispatchQueue.main.async { [weak self] in
+            self?.session(id: sessionID)?.takeKeyboardFocus()
+        }
+    }
+
+    /// 强制收起输入框（会话被关掉时）。
+    func endRenaming(sessionID: UUID) {
+        guard sessionBeingRenamed == sessionID else { return }
+        sessionBeingRenamed = nil
+    }
+
     // MARK: - 字号
 
     func increaseFontSize() {
@@ -442,6 +518,23 @@ final class AppState: ObservableObject {
 
     func resetFontSize() {
         fontSize = AppFont.defaultSize
+    }
+
+    // MARK: - 左侧竖栏
+
+    /// 点竖栏上的图标：已经展开的那个再点一下就收起。
+    func toggleSidebar(_ panel: SidebarPanel) {
+        activeSidebar = activeSidebar == panel ? nil : panel
+    }
+
+    /// 需要选主机时（⌘T / 关掉最后一个 tab 之后）把主机面板露出来。
+    func revealHosts() {
+        activeSidebar = .hosts
+    }
+
+    /// 拖面板右边缘。宽度夹在上下限之间：太窄看不清主机名，太宽把终端挤没了。
+    func setSidebarWidth(_ width: CGFloat) {
+        sidebarWidth = min(max(width.rounded(), Self.minimumSidebarWidth), Self.maximumSidebarWidth)
     }
 
     // MARK: - 主机编辑

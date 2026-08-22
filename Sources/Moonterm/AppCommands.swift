@@ -8,9 +8,10 @@ struct AppCommands: Commands {
 
     var body: some Commands {
         // 去掉「新建窗口」，换成「新建连接」。本 App 只用一个窗口，多连接靠 tab 与分栏。
+        // 选主机的地方只有一处 —— 左侧竖栏的主机面板，所以这里就是把它展开。
         CommandGroup(replacing: .newItem) {
             Button("新建连接…") {
-                appState.isHostPickerPresented = true
+                appState.revealHosts()
             }
             .keyboardShortcut("t", modifiers: .command)
         }
@@ -77,6 +78,14 @@ struct AppCommands: Commands {
 
             Divider()
 
+            Button("重命名当前分栏…") {
+                appState.beginRenamingFocusedSession()
+            }
+            .keyboardShortcut("r", modifiers: [.command, .shift])
+            .disabled(appState.selectedTab == nil)
+
+            Divider()
+
             Button("聚焦左侧分栏") { appState.moveFocus(.leading) }
                 .keyboardShortcut(.leftArrow, modifiers: [.command, .option])
             Button("聚焦右侧分栏") { appState.moveFocus(.trailing) }
@@ -112,6 +121,13 @@ struct AppCommands: Commands {
         }
 
         CommandGroup(after: .sidebar) {
+            Button(appState.activeSidebar == .hosts ? "隐藏主机面板" : "显示主机面板") {
+                appState.toggleSidebar(.hosts)
+            }
+            .keyboardShortcut("b", modifiers: .command)
+
+            Divider()
+
             Button("放大字号") {
                 appState.increaseFontSize()
             }

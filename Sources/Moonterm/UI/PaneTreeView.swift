@@ -202,7 +202,7 @@ private struct PaneLeafView: View {
     private var focusRing: some View {
         let visible = isActive && tab.paneCount > 1 && group.contains(tab.focusedSessionID)
         return Rectangle()
-            .strokeBorder(Color(nsColor: .controlAccentColor), lineWidth: 2)
+            .strokeBorder(ChromeStyle.focusRing, lineWidth: 2)
             .opacity(visible ? 1 : 0)
             .allowsHitTesting(false)
     }
@@ -269,7 +269,7 @@ private struct PaneChip: View {
     @EnvironmentObject private var appState: AppState
 
     let session: SSHSession
-    /// 窗口名（窗口1、窗口2…）。主机名在 tab 上，这里不重复。
+    /// 窗口名：默认「窗口1」「窗口2」…，改过名就是改过的那个。主机名在 tab 上，这里不重复。
     let name: String
     /// 是不是这个分栏当前显示的那个。
     let isShown: Bool
@@ -277,12 +277,29 @@ private struct PaneChip: View {
 
     @State private var isHovering = false
 
+    private var isRenaming: Bool { appState.sessionBeingRenamed == session.id }
+
     var body: some View {
+        // 重命名时整个标签换成输入框：留着原来的点击与拖拽手势会把输入打断。
+        if isRenaming {
+            PaneNameField(
+                initialName: name,
+                onCommit: { appState.rename(sessionID: session.id, to: $0) },
+                onCancel: { appState.cancelRenaming(sessionID: session.id) }
+            )
+        } else {
+            chip
+        }
+    }
+
+    private var chip: some View {
         HStack(spacing: 4) {
             Circle()
                 .fill(session.state.indicatorColor)
                 .frame(width: 6, height: 6)
 
+            // 宽度跟着名字走：给 Text 套 maxWidth 会让它把剩余空间全占掉，
+            // 短名字左右就多出一大片空白。长度上限交给模型层（`TerminalTab.maximumNameLength`）。
             Text(name)
                 .font(.system(size: 11))
                 .lineLimit(1)
@@ -308,7 +325,10 @@ private struct PaneChip: View {
         )
         .contentShape(Rectangle())
         .onHover { isHovering = $0 }
+        // 双击改名。放在单击之前，SwiftUI 才会优先按双击识别。
+        .onTapGesture(count: 2) { appState.beginRenaming(sessionID: session.id) }
         .onTapGesture(perform: select)
+        .onMiddleClick { appState.closeSession(sessionID: session.id) }
         .paneDrag(
             appState.drag,
             payload: .pane(sessionID: session.id),
@@ -316,8 +336,9 @@ private struct PaneChip: View {
         ) {
             appState.completeDrag()
         }
-        .help("\(session.config.endpointDescription) — \(session.state.label)（拖动可在本标签页内重新布局）")
+        .help("\(session.config.endpointDescription) — \(session.state.label)（双击改名，中键关闭，拖动可在本标签页内重新布局）")
         .contextMenu {
+            Button("重命名…") { appState.beginRenaming(sessionID: session.id) }
             Button("重新连接") { session.reconnect() }
             Divider()
             Button("关闭") { appState.closeSession(sessionID: session.id) }
@@ -332,5 +353,67 @@ private struct PaneChip: View {
     private func select() {
         appState.activate(sessionID: session.id)
         session.takeKeyboardFocus()
+    }
+}
+
+// MARK: - 改名输入框
+
+/// 就地改名：占着小标签的位置，回车或点别处提交，Esc 放弃，清空则恢复「窗口N」。
+private struct PaneNameField: View {
+
+    let initialName: String
+    let onCommit: (String) -> Void
+    let onCancel: () -> Void
+
+    @State private var draft = ""
+    /// 提交与放弃都只能发生一次：Esc 之后输入框会失焦，别再把草稿又提交一遍。
+    @State private var isSettled = false
+    @FocusState private var isFocused: Bool
+
+    /// 字号，和小标签上的名字保持一致。
+    private static let fontSize: CGFloat = 11
+
+    var body: some View {
+        TextField("", text: $draft)
+            .textFieldStyle(.plain)
+            .font(.system(size: Self.fontSize))
+            .focused($isFocused)
+            // 宽度按当前内容量出来，只多留一个光标的位置 —— 固定宽度的方框在短名字上空得难看。
+            .frame(width: fieldWidth, height: 16)
+            .padding(.horizontal, 5)
+            .background(
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(Color.black.opacity(0.45))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 4)
+                    .strokeBorder(ChromeStyle.accent, lineWidth: 1)
+            )
+            .onAppear {
+                draft = initialName
+                isFocused = true
+            }
+            .onSubmit { settle { onCommit(draft) } }
+            .onExitCommand { settle(onCancel) }
+            .onChange(of: isFocused) { focused in
+                // 点到别处 = 确认，和 Finder 改文件名一致。
+                guard !focused else { return }
+                settle { onCommit(draft) }
+            }
+            .help("回车确认，Esc 取消；清空则恢复默认名字")
+    }
+
+    private func settle(_ body: () -> Void) {
+        guard !isSettled else { return }
+        isSettled = true
+        body()
+    }
+
+    /// 用 AppKit 量一下当前草稿的宽度：SwiftUI 里没有比这更省事的「按内容定宽」写法。
+    private var fieldWidth: CGFloat {
+        let font = NSFont.systemFont(ofSize: Self.fontSize)
+        let measured = (draft as NSString).size(withAttributes: [.font: font]).width
+        // +7 是光标的位置；名字很长时不再跟着长，输入框内部自己滚动。
+        return min(max(measured + 7, 26), 150)
     }
 }

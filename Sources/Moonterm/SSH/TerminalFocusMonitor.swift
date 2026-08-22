@@ -11,7 +11,8 @@ final class TerminalFocusMonitor {
 
     func start(onHit: @escaping (SSHTerminalView) -> Void) {
         guard monitor == nil else { return }
-        monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown]) { event in
+        // 右键也算「点了这一栏」：右键即粘贴，内容得落在用户以为的那个分栏里。
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { event in
             if let view = Self.terminalView(for: event) {
                 onHit(view)
             }

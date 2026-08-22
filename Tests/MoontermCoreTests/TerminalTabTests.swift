@@ -70,4 +70,58 @@ final class TerminalTabTests: XCTestCase {
         XCTAssertNil(tab.windowNumber(of: b))
         XCTAssertEqual(tab.windowName(of: b), "窗口2")
     }
+
+    // MARK: - 重命名
+
+    func testRenameReplacesDisplayedName() {
+        var tab = makeTab()
+        tab.rename(sessionID: a, to: "编译")
+
+        XCTAssertEqual(tab.windowName(of: a), "编译")
+        XCTAssertEqual(tab.customName(of: a), "编译")
+        XCTAssertEqual(tab.defaultWindowName(of: a), "窗口1", "默认名字还在，清空后要能回去")
+        XCTAssertEqual(tab.windowNumber(of: a), 1, "改名不影响编号分配")
+    }
+
+    func testRenameTrimsWhitespaceAndClampsLength() {
+        var tab = makeTab()
+        tab.rename(sessionID: a, to: "  日志  ")
+        XCTAssertEqual(tab.windowName(of: a), "日志")
+
+        let long = String(repeating: "长", count: TerminalTab.maximumNameLength + 10)
+        tab.rename(sessionID: a, to: long)
+        XCTAssertEqual(tab.windowName(of: a).count, TerminalTab.maximumNameLength)
+    }
+
+    func testEmptyNameRestoresDefault() {
+        var tab = makeTab()
+        tab.rename(sessionID: a, to: "编译")
+        tab.rename(sessionID: a, to: "   ")
+
+        XCTAssertNil(tab.customName(of: a))
+        XCTAssertEqual(tab.windowName(of: a), "窗口1")
+    }
+
+    func testRenameIgnoresSessionsOutsideTheTab() {
+        var tab = makeTab()
+        tab.rename(sessionID: b, to: "别人家的窗口")
+        XCTAssertNil(tab.customName(of: b))
+    }
+
+    func testClosedWindowDoesNotLeaveItsNameToTheNextOne() {
+        var tab = makeTab()
+        tab.root.insert(sessionID: b, relativeTo: a, edge: .trailing)
+        tab.assignWindowNumber(to: b)
+        tab.rename(sessionID: b, to: "编译")
+
+        tab.root.remove(sessionID: b)
+        tab.releaseWindowNumber(of: b)
+
+        // 编号 2 被复用时不能顶着上一个窗口的名字。
+        let reborn = UUID()
+        tab.root.insert(sessionID: reborn, relativeTo: a, edge: .trailing)
+        XCTAssertEqual(tab.assignWindowNumber(to: reborn), 2)
+        XCTAssertNil(tab.customName(of: reborn))
+        XCTAssertEqual(tab.windowName(of: reborn), "窗口2")
+    }
 }

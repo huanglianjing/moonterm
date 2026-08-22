@@ -9,38 +9,33 @@ struct TabBarView: View {
     @EnvironmentObject private var drag: DragController
 
     var body: some View {
-        HStack(spacing: 0) {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 1) {
-                    ForEach(appState.tabs) { tab in
-                        TabItemView(
-                            tab: tab,
-                            statusColor: SessionStatus.aggregateColor(of: appState.sessions(in: tab).map { $0.state }),
-                            isSelected: tab.id == appState.selectedTabID,
-                            isDragging: drag.isDragging(.tab(id: tab.id))
-                        )
-                        .reportFrame(TabFramesKey.self) { [DragController.TabFrame(id: tab.id, rect: $0)] }
-                    }
+        // 只有 tab 本身。新建连接一律走左侧竖栏的主机面板（⌘T 会把它展开）。
+        ScrollView(.horizontal, showsIndicators: false) {
+            // 拖拽期间只做视觉平移：被拖的那个跟着指针走，其余的滑开让位，
+            // 真正的顺序等松手才由 `completeDrag()` 改。
+            let shifts = drag.tabShifts()
+
+            HStack(spacing: 1) {
+                ForEach(appState.tabs) { tab in
+                    let isDragging = drag.isDragging(.tab(id: tab.id))
+
+                    TabItemView(
+                        tab: tab,
+                        statusColor: SessionStatus.aggregateColor(of: appState.sessions(in: tab).map { $0.state }),
+                        isSelected: tab.id == appState.selectedTabID,
+                        isDragging: isDragging
+                    )
+                    .reportFrame(TabFramesKey.self) { [DragController.TabFrame(id: tab.id, rect: $0)] }
+                    .offset(x: isDragging ? drag.draggedTabTranslation : (shifts[tab.id] ?? 0))
+                    // 被拖的那个要一比一跟手，不能有动画拖后腿；让位的那些才需要滑得顺。
+                    .animation(
+                        drag.isDraggingTab && !isDragging ? .easeOut(duration: 0.16) : nil,
+                        value: shifts[tab.id] ?? 0
+                    )
+                    .zIndex(isDragging ? 1 : 0)
                 }
-                .padding(.horizontal, 4)
             }
-
-            Rectangle()
-                .fill(ChromeStyle.hairline)
-                .frame(width: 1, height: 22)
-
-            Button {
-                appState.isHostPickerPresented = true
-            } label: {
-                Image(systemName: "plus")
-                    .frame(width: 28, height: 26)
-            }
-            .buttonStyle(.plain)
-            .help("新建连接（⌘T）")
-            .popover(isPresented: $appState.isHostPickerPresented, arrowEdge: .bottom) {
-                HostPickerView()
-                    .environmentObject(appState)
-            }
+            .padding(.horizontal, 4)
         }
         .frame(height: 32)
         .background(ChromeStyle.bar)
@@ -104,9 +99,12 @@ private struct TabItemView: View {
             RoundedRectangle(cornerRadius: 5)
                 .fill(background)
         )
-        .opacity(isDragging ? 0.4 : 1)
+        // 跟着指针走的是这个 tab 本身，所以别画得太淡；用一点阴影表示「被拎起来了」。
+        .opacity(isDragging ? 0.92 : 1)
+        .shadow(color: .black.opacity(isDragging ? 0.35 : 0), radius: 4, y: 1)
         .contentShape(Rectangle())
         .onTapGesture { appState.selectedTabID = tab.id }
+        .onMiddleClick { appState.close(tabID: tab.id) }
         .onHover { isHovering = $0 }
         .paneDrag(
             appState.drag,
@@ -130,7 +128,7 @@ private struct TabItemView: View {
         let sessions = appState.sessions(in: tab)
         let endpoint = tab.host.endpointDescription
         if sessions.count == 1, let session = sessions.first {
-            return "\(endpoint) — \(session.state.label)（拖动可重排）"
+            return "\(endpoint) — \(session.state.label)（拖动可重排，中键关闭）"
         }
         let windows = sessions
             .map { "\(tab.windowName(of: $0.id)) — \($0.state.label)" }

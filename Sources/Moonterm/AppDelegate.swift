@@ -24,8 +24,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-/// 系统 File 菜单里的「关闭窗口」默认占用 ⌘W，会抢掉我们的「关闭标签页」。
-/// 把它挪到 ⇧⌘W，⌘W 留给关闭 tab —— 这也是终端类 App 的通行做法。
+/// 系统 File 菜单里的「关闭窗口」默认占用 ⌘W，会抢掉我们的「关闭当前分栏」。
+/// 把它挪到 ⇧⌘W，⌘W 留给关闭分栏 —— 这也是终端类 App 的通行做法。
 enum MenuCustomizer {
 
     static func relocateCloseWindowShortcut() {
@@ -38,9 +38,15 @@ enum MenuCustomizer {
                 guard item.keyEquivalent == "w",
                       item.keyEquivalentModifierMask == [.command]
                 else { continue }
-                // 小写字母 + 显式 .shift：AppKit 里这是 ⇧⌘W 的规范写法。
-                item.keyEquivalent = "w"
-                item.keyEquivalentModifierMask = [.command, .shift]
+                // 必须写成**大写 W + 只带 .command**。
+                //
+                // 写成小写 "w" + [.command, .shift] 看着也像 ⇧⌘W（菜单里显示也没问题），
+                // 但 AppKit 匹配快捷键时按小写字面量比对，裸 ⌘W 依然会命中这一项：
+                // File 菜单排在自定义菜单前面，于是 ⌘W 关掉的是 App 唯一的窗口
+                // （`applicationShouldTerminateAfterLastWindowClosed` 为 true → 整个 App 退出），
+                // 而不是我们想关的那个分栏。
+                item.keyEquivalent = "W"
+                item.keyEquivalentModifierMask = [.command]
             }
         }
     }

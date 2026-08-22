@@ -52,6 +52,8 @@ final class DragController: ObservableObject {
         var payload: Payload
         /// 跟随指针的「幽灵」上显示的名字。
         var title: String
+        /// 起手位置。tab 拖拽时被拖的那个 tab 要按位移跟着指针走。
+        var startLocation: CGPoint
         var location: CGPoint
         var target: Target = .none
     }
@@ -68,6 +70,11 @@ final class DragController: ObservableObject {
     var tabFrames: [TabFrame] = []
     /// 整条 tab 条的矩形。
     var tabBarFrame: CGRect = .zero
+    /// 起手那一刻的 tab 几何快照。
+    ///
+    /// 拖拽期间 tab 只做**视觉平移**（`.offset`），模型里的顺序等松手才改，所以这份快照全程有效。
+    /// 插入位必须按快照算：实时矩形里含着平移量，拿它算等于把输出接回输入，tab 会来回抖。
+    private var tabFramesAtDragStart: [TabFrame] = []
 
     struct TabFrame: Equatable {
         let id: UUID
@@ -77,7 +84,12 @@ final class DragController: ObservableObject {
     // MARK: - 生命周期
 
     func update(payload: Payload, title: String, location: CGPoint) {
-        var next = state ?? State(payload: payload, title: title, location: location)
+        if state?.payload != payload {
+            // 起手（或中途换了拖拽对象）：记下起点，并把 tab 几何拍个快照。
+            tabFramesAtDragStart = tabFrames
+            state = State(payload: payload, title: title, startLocation: location, location: location)
+        }
+        var next = state ?? State(payload: payload, title: title, startLocation: location, location: location)
         next.payload = payload
         next.title = title
         next.location = location
@@ -87,6 +99,7 @@ final class DragController: ObservableObject {
 
     func end() {
         state = nil
+        tabFramesAtDragStart = []
     }
 
     func isDragging(_ payload: Payload) -> Bool {
@@ -125,12 +138,59 @@ final class DragController: ObservableObject {
         return header.chips.count
     }
 
-    /// 指针在某个 tab 的左半边就插它前面，右半边就插它后面。
+    /// 指针在某个 tab 的左半边就插它前面，右半边就插它后面。按起手快照算，见 `tabFramesAtDragStart`。
     private func insertIndex(at point: CGPoint) -> Int {
-        for (index, frame) in tabFrames.enumerated() where point.x < frame.rect.midX {
+        let frames = tabFramesAtDragStart.isEmpty ? tabFrames : tabFramesAtDragStart
+        for (index, frame) in frames.enumerated() where point.x < frame.rect.midX {
             return index
         }
-        return tabFrames.count
+        return frames.count
+    }
+
+    // MARK: - tab 实时平移
+
+    /// 拖 tab 时各 tab 该平移多少（按 tab id，横向点数）。没在拖 tab 就是空的。
+    ///
+    /// 只是**视觉预览**：模型里的顺序等松手才由 `moveTab` 改。位移按快照里各 tab 的实际宽度
+    /// 重新累加，所以宽窄不一的 tab 也能滑到正确的位置。
+    func tabShifts() -> [UUID: CGFloat] {
+        guard let state,
+              case .tab(let draggedID) = state.payload,
+              case .tabBar(let insertIndex) = state.target,
+              let from = tabFramesAtDragStart.firstIndex(where: { $0.id == draggedID })
+        else { return [:] }
+
+        var reordered = tabFramesAtDragStart
+        let moved = reordered.remove(at: from)
+        // `insertIndex` 是「插到原列表第几项之前」，摘掉自己之后目标下标要往前挪一格。
+        let destination = min(max(insertIndex > from ? insertIndex - 1 : insertIndex, 0), reordered.count)
+        reordered.insert(moved, at: destination)
+
+        // 快照里相邻两项的间隙就是 tab 条 HStack 的 spacing。
+        let spacing = tabFramesAtDragStart.count > 1
+            ? max(tabFramesAtDragStart[1].rect.minX - tabFramesAtDragStart[0].rect.maxX, 0)
+            : 0
+
+        var shifts: [UUID: CGFloat] = [:]
+        var x = tabFramesAtDragStart[0].rect.minX
+        for frame in reordered {
+            shifts[frame.id] = x - frame.rect.minX
+            x += frame.rect.width + spacing
+        }
+        return shifts
+    }
+
+    /// 被拖的那个 tab 跟着指针走的横向位移。没在拖 tab 就是 0。
+    var draggedTabTranslation: CGFloat {
+        guard let state, case .tab = state.payload else { return 0 }
+        return state.location.x - state.startLocation.x
+    }
+
+    /// 正在拖 tab。平移动画只在拖拽期间开着：松手那一下顺序真的变了，
+    /// 平移量必须**立刻**归零，否则 tab 会先跳一格再滑回来。
+    var isDraggingTab: Bool {
+        guard let state, case .tab = state.payload else { return false }
+        return true
     }
 
     // MARK: - 高亮矩形
@@ -141,16 +201,9 @@ final class DragController: ObservableObject {
         case .none:
             return nil
 
-        case .tabBar(let insertIndex):
-            guard !tabFrames.isEmpty else { return nil }
-            let x: CGFloat
-            if insertIndex < tabFrames.count {
-                x = tabFrames[insertIndex].rect.minX
-            } else {
-                x = tabFrames[tabFrames.count - 1].rect.maxX
-            }
-            let rect = tabBarFrame
-            return CGRect(x: x - 1.5, y: rect.minY + 3, width: 3, height: max(rect.height - 6, 1))
+        case .tabBar:
+            // tab 重排不画插入线：各 tab 直接实时滑到新位置（`tabShifts()`），落点自己就看得见。
+            return nil
 
         case .paneHeader(let anchor, let insertIndex):
             // 小标签之间的插入位。
