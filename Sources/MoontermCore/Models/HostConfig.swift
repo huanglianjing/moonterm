@@ -15,6 +15,8 @@ public struct HostConfig: Identifiable, Codable, Hashable {
     /// 首次连接自动接受服务端主机密钥（`StrictHostKeyChecking=accept-new`）。
     /// 关掉则用 `ask`，需要在终端里手动回答 yes/no。
     public var acceptNewHostKey: Bool
+    /// 所属分组（见 `HostGroup`）。`nil` = 未分组，排在所有分组下面。
+    public var groupID: UUID?
 
     public init(
         id: UUID = UUID(),
@@ -22,7 +24,8 @@ public struct HostConfig: Identifiable, Codable, Hashable {
         host: String = "",
         port: Int = 22,
         username: String = "",
-        acceptNewHostKey: Bool = true
+        acceptNewHostKey: Bool = true,
+        groupID: UUID? = nil
     ) {
         self.id = id
         self.name = name
@@ -30,6 +33,7 @@ public struct HostConfig: Identifiable, Codable, Hashable {
         self.port = port
         self.username = username
         self.acceptNewHostKey = acceptNewHostKey
+        self.groupID = groupID
     }
 
     /// tab 与列表里展示的名字。
@@ -91,7 +95,7 @@ public struct HostConfig: Identifiable, Codable, Hashable {
     // 手写 decode，缺字段时退回默认值，避免旧版本或手改过的 hosts.json 直接读不出来。
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, host, port, username, acceptNewHostKey
+        case id, name, host, port, username, acceptNewHostKey, groupID
     }
 
     public init(from decoder: Decoder) throws {
@@ -102,5 +106,6 @@ public struct HostConfig: Identifiable, Codable, Hashable {
         self.port = try c.decodeIfPresent(Int.self, forKey: .port) ?? 22
         self.username = try c.decodeIfPresent(String.self, forKey: .username) ?? ""
         self.acceptNewHostKey = try c.decodeIfPresent(Bool.self, forKey: .acceptNewHostKey) ?? true
+        self.groupID = try c.decodeIfPresent(UUID.self, forKey: .groupID)
     }
 }

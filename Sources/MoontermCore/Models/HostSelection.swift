@@ -68,6 +68,12 @@ public struct HostSelection: Equatable {
         return order.filter { selected.contains($0) }
     }
 
+    /// 点到列表外的空白：整个选区清掉。锚点一起清 —— 下一次 ⇧ 点该从新点的那台重新起算。
+    public mutating func clear() {
+        selected = []
+        anchor = nil
+    }
+
     /// 主机被删掉后清理选区。锚点也跟着没了，免得下一次 ⇧ 点从一个不存在的地方开始扩。
     public mutating func remove(_ ids: [UUID]) {
         selected.subtract(ids)

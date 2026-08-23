@@ -136,6 +136,15 @@ struct HostManagerView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
+            // 这个面板是一份平铺的表，所以把所属分组标出来，免得和侧栏里的分段对不上号。
+            if let groupID = host.groupID, let group = appState.configStore.group(id: groupID) {
+                Text(group.displayName)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(Capsule().fill(Color.secondary.opacity(0.15)))
+            }
             if appState.configStore.password(for: host).isEmpty {
                 Text("未存密码")
                     .font(.system(size: 10))

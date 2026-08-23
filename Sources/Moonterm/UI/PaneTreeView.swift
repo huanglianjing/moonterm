@@ -223,6 +223,9 @@ private struct PaneHeaderBar: View {
     /// 各标签的矩形，供拖拽落点判定用（子视图上报，本视图汇总后再往上报）。
     @State private var chips: [DragController.Chip] = []
 
+    /// 这条栏的高度，同时也是那个 `+` 方块的边长。
+    fileprivate static let height: CGFloat = 20
+
     var body: some View {
         HStack(spacing: 2) {
             ForEach(group.sessionIDs, id: \.self) { sessionID in
@@ -237,20 +240,20 @@ private struct PaneHeaderBar: View {
                 }
             }
 
-            Button {
+            // 命中范围撑成一整块正方形（边长 = 这条栏的高度），悬停时整块亮一下。
+            ChromeIconButton(
+                systemName: "plus",
+                side: Self.height,
+                iconSize: 8
+            ) {
                 appState.addWindow(toPaneOf: group.activeID)
-            } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: 8, weight: .bold))
-                    .frame(width: 16, height: 16)
             }
-            .buttonStyle(.plain)
             .help("在这个分栏新建窗口（\(tab.title)）")
 
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 3)
-        .frame(height: 20)
+        .frame(height: Self.height)
         .background(ChromeStyle.paneHeader)
         .onPreferenceChange(ChipFramesKey.self) { frames in
             chips = frames.sorted { $0.rect.minX < $1.rect.minX }
@@ -277,7 +280,13 @@ private struct PaneChip: View {
 
     @State private var isHovering = false
 
+    /// 小标签的高度，同时也是右端那个关闭方块的边长。
+    private static let height: CGFloat = 16
+
     private var isRenaming: Bool { appState.sessionBeingRenamed == session.id }
+
+    /// 关闭按钮什么时候露出来：鼠标在这个小标签上，或者它就是本分栏当前显示的那个。
+    private var isCloseVisible: Bool { isHovering || isShown }
 
     var body: some View {
         // 重命名时整个标签换成输入框：留着原来的点击与拖拽手势会把输入打断。
@@ -306,19 +315,20 @@ private struct PaneChip: View {
                 .truncationMode(.middle)
 
             // 一直占着位置，只改透明度 —— 否则鼠标一进来标签就变宽。
-            Button {
+            // 命中范围是小标签右端一整块正方形（边长 = 标签高度）；看不见时不接点击，别误关窗口。
+            ChromeIconButton(
+                systemName: "xmark",
+                side: Self.height,
+                iconSize: 7
+            ) {
                 appState.closeSession(sessionID: session.id)
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 7, weight: .bold))
-                    .frame(width: 11, height: 11)
             }
-            .buttonStyle(.plain)
-            .opacity(isHovering || isShown ? 1 : 0)
+            .opacity(isCloseVisible ? 1 : 0)
+            .allowsHitTesting(isCloseVisible)
             .help("关闭（⌘W）")
         }
-        .padding(.horizontal, 5)
-        .frame(height: 16)
+        .padding(.leading, 5)
+        .frame(height: Self.height)
         .background(
             RoundedRectangle(cornerRadius: 4)
                 .fill(background)

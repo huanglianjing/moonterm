@@ -110,6 +110,17 @@ final class HostSelectionTests: XCTestCase {
         XCTAssertEqual(selection.targets(rightClicking: a, in: order), [a])
     }
 
+    // MARK: - 点空白处
+
+    func testClearDropsSelectionAndAnchor() {
+        var selection = HostSelection()
+        selection.click(b, kind: .plain, in: order)
+        selection.click(d, kind: .extend, in: order)
+        selection.clear()
+        XCTAssertTrue(selection.selected.isEmpty)
+        XCTAssertNil(selection.anchor, "下一次 ⇧ 点从新点的那台重新起算")
+    }
+
     // MARK: - 删除后的清理
 
     func testRemoveClearsDeletedIDsAndAnchor() {

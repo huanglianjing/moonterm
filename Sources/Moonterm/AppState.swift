@@ -539,8 +539,9 @@ final class AppState: ObservableObject {
 
     // MARK: - 主机编辑
 
-    func beginCreatingHost() {
-        hostBeingEdited = HostConfig()
+    /// 新建主机。`group` 是预选的分组（从分组的右键菜单进来时用），nil = 未分组。
+    func beginCreatingHost(inGroup group: UUID? = nil) {
+        hostBeingEdited = HostConfig(groupID: group)
     }
 
     func beginEditing(host: HostConfig) {

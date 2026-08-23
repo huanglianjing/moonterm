@@ -62,8 +62,16 @@ private struct TabItemView: View {
 
     @State private var isHovering = false
 
+    /// tab 的高度。
+    private static let height: CGFloat = 26
+    /// 右端关闭方块的边长（命中范围）。比 tab 略矮，见 body 里那段注释。
+    private static let closeSide: CGFloat = 20
+
+    /// 关闭按钮什么时候露出来：鼠标在这个 tab 上，或者它就是当前 tab。
+    private var isCloseVisible: Bool { isHovering || isSelected }
+
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 5) {
             Circle()
                 .fill(statusColor)
                 .frame(width: 7, height: 7)
@@ -81,20 +89,28 @@ private struct TabItemView: View {
                     .help("\(tab.sessionCount) 个窗口 · \(tab.paneCount) 个分栏")
             }
 
-            Button {
+            // 命中范围是一整块正方形，但边长取得比 tab 矮一点：铺满 26 点的话，
+            // 图标周围那圈余量就成了标题和 ✕ 之间一道明显的空隙。
+            // 看不见的时候不接点击 —— 那块地方挺大，不能让人误关。
+            ChromeIconButton(
+                systemName: "xmark",
+                side: Self.closeSide,
+                iconSize: 8,
+                cornerRadius: 5
+            ) {
                 appState.close(tabID: tab.id)
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 8, weight: .bold))
-                    .frame(width: 14, height: 14)
             }
-            .buttonStyle(.plain)
-            .opacity(isHovering || isSelected ? 1 : 0)
+            .opacity(isCloseVisible ? 1 : 0)
+            .allowsHitTesting(isCloseVisible)
             .help("关闭标签页")
         }
-        .padding(.horizontal, 8)
-        .frame(height: 26)
-        .frame(minWidth: 110, maxWidth: 200)
+        // 左边给圆点留一点空（和分栏小标签一致），右边靠关闭方块自带的余量收边。
+        .padding(.leading, 5)
+        .padding(.trailing, 2)
+        .frame(height: Self.height)
+        // 宽度跟着标题走，短主机名就是个短 tab —— 定了 `minWidth` 的话，多出来的宽度
+        // 只会变成标题和 ✕ 之间的一片空白。长标题到 200 点截断。
+        .frame(maxWidth: 200)
         .background(
             RoundedRectangle(cornerRadius: 5)
                 .fill(background)

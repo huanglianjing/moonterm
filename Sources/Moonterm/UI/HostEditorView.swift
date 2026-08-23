@@ -35,6 +35,18 @@ struct HostEditorView: View {
                 TextField("端口", text: $portText, prompt: Text("22"))
                 TextField("用户名", text: $draft.username, prompt: Text("root"))
                 SecureField("密码", text: $password, prompt: Text("留空则用密钥 / 手动输入"))
+
+                // 分组可以不选。一个分组都还没建时这一项没有意义，直接不显示。
+                if !appState.configStore.groups.isEmpty {
+                    Picker("分组", selection: $draft.groupID) {
+                        Text("不分组").tag(UUID?.none)
+                        Divider()
+                        ForEach(appState.configStore.groups) { group in
+                            Text(group.displayName).tag(Optional(group.id))
+                        }
+                    }
+                }
+
                 Toggle("首次连接自动信任主机密钥", isOn: $draft.acceptNewHostKey)
             }
             .formStyle(.grouped)

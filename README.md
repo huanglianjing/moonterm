@@ -5,8 +5,12 @@ macOS 原生 SSH 客户端。Swift + SwiftUI + AppKit，顶部多 tab，同时�
 ## 功能
 
 - 最左边一条常驻**功能竖栏**（类似 VS Code）：目前一个图标 —— 主机。点开在右边展开主机面板，**占布局空间**（终端跟着被挤窄并 reflow），再点收起，`⌘B` 也能开关；边缘可拖着改宽度，宽度与开合状态都记住
-  - 主机面板里**单击选中、双击连接**（每次双击都是一个新 tab，同一台开好几个也行）；`⌘` 点单独加减、`⇧` 点整段扩选，右键菜单可**批量连接或删除**选中的那几台
-  - 单选时右键菜单还有编辑 / 复制 / 删除；面板顶部的 `+` 新建主机
+  - 主机面板里**单击选中、双击连接**（每次双击都是一个新 tab，同一台开好几个也行）；`⌘` 点单独加减、`⇧` 点整段扩选，点列表下方的空白取消全部选中；右键菜单可**批量连接或删除**选中的那几台
+  - 单选时右键菜单还有编辑 / 复制 / 删除；「移到分组」只列**真能去**的地方：还没建过分组时是一条灰着的「未创建分组」，选中的几台都在同一段里时那一段不出现，分散在不同段时全都列出来
+  - 面板顶部的 `+` 分成「添加主机」和「添加分组」
+  - **分组**：分组一律排在上面，未分组的主机垫在最下面；点分组标题折叠/展开（折叠状态记住），右键可改名、在此分组新建主机、删除分组（**里面的主机不会跟着删**，会移到未分组末尾）
+  - **拖动排序**：拖主机可以在组内换位置、拖进别的分组、拖到列表最下面变成未分组；拖到分组标题上 = 整片放进那个分组（分组行会整行高亮），其余落点画一条插入线。拖一台已经选中的主机 = 整片选区一起搬；拖分组标题 = 连里面的主机一起换位置
+  - 新建的主机一律排到最下面（选了分组就是该分组的末尾）
   - 选主机只有这一处：tab 条上没有 `+`，`⌘T` 就是把这个面板展开
 - 顶部 tab，多台设备同时连接；**切换 tab 不断线**（终端视图常驻，PTY 不销毁）
 - **一个 tab 固定一台主机**：tab 标题就是主机名，tab 里所有分栏都是这台主机
@@ -17,7 +21,7 @@ macOS 原生 SSH 客户端。Swift + SwiftUI + AppKit，顶部多 tab，同时�
   - 拖窗口小标签在本 tab 内重新布局：落在分栏边缘 = 开新分栏；落在正中或落在标题栏上 = 并进那个分栏，多一个小标签
   - 拖分割线调整比例；当前分栏有一圈暗蓝色边框（拖拽时的落点框用同一个暗蓝）
   - tab 和窗口小标签上**按中键即关闭**（等于点那个 ✕）
-- 主机配置：名称 / 地址 / 端口 / 用户名 / 密码，本地持久化
+- 主机配置：名称 / 地址 / 端口 / 用户名 / 密码 / 分组（可以不选），本地持久化
 - 完整终端体验：VT/xterm 仿真、真彩色、鼠标上报、滚动缓冲、选区复制粘贴（基于 [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm)）
 - 终端里**选中即复制、右键即粘贴**（⌘C / ⌘V 照旧可用）
 - 断线有明确提示与失败原因（认证失败 / 端口不通 / 主机密钥变更 …），⌘R 重连
@@ -87,6 +91,12 @@ tab 与分栏：每个 tab 是「一台主机 + 一棵分栏树」（`TerminalTa
 拖拽用 SwiftUI 的 `DragGesture` 而不是 `onDrag`/`onDrop`：起手在 tab 条或分栏子标题条上，
 AppKit 会把后续鼠标事件继续投给起点视图，指针移到终端上方时不会被 SwiftTerm 的 NSView 截走。
 
+主机面板的拖拽是另一套（`HostSidebarDrag.swift`）：主机行的点击本来就要修饰键和点击次数，
+走的是 `ClickCatcher` 那层 NSView；mouseDown 一旦被它接下，后续 mouseDragged 就只发给它，
+`DragGesture` 再也收不到 —— 所以点击和拖动必须从同一条 AppKit 通道报出来。
+分组顺序在 `ConfigStore.groups`，主机顺序只有 `ConfigStore.hosts` 这一份数组：
+分组只是把这份顺序切成几段展示，所以「排到某个分组末尾」就等于「排到数组末尾」。
+
 ## 配置文件
 
 | 文件 | 内容 |
@@ -103,10 +113,11 @@ AppKit 会把后续鼠标事件继续投给起点视图，指针移到终端上�
 ```
 Sources/MoontermCore/         纯逻辑，无 UI 依赖，有单测覆盖
   Models/HostConfig.swift     主机配置模型与校验
+  Models/HostGroup.swift      主机分组（名字 + 折叠状态；成员关系由 HostConfig.groupID 单向指过来）
   Models/HostSelection.swift  主机列表的多选语义（重选 / ⌘ 加减 / ⇧ 扩选 / 右键作用范围）
   Models/PaneLayout.swift     分栏树（分栏增删移、组内并入/切换、占比）与落点判定
   Models/TerminalTab.swift    一个 tab = 一台主机 + 分栏树 + 窗口编号 + 聚焦的会话
-  Store/ConfigStore.swift     配置持久化（原子写 + 0600）
+  Store/ConfigStore.swift     配置持久化（原子写 + 0600）、分组增删改、拖动排序
   Store/SecretStore.swift     密码存取抽象 + 明文实现
   SSH/SSHCommandBuilder.swift ssh argv/env 构造
   SSH/AskpassBridge.swift     临时密码文件的创建与清理
@@ -121,11 +132,12 @@ Sources/Moonterm/             App 本体
   SSH/SSHSession.swift        单个会话的状态机
   SSH/TerminalFocusMonitor.swift  点终端就聚焦所在分栏（窗口级鼠标监听）
   UI/ActivityBarView.swift    最左侧功能竖栏与它上面的图标（SidebarPanel 枚举在这里）
-  UI/HostSidebarView.swift    竖栏展开的主机面板（点一台即连）+ 可拖的宽度把手
+  UI/HostSidebarView.swift    竖栏展开的主机面板（分组 / 选择 / 连接 / 就地改名）+ 可拖的宽度把手
+  UI/HostSidebarDrag.swift    主机面板的拖拽状态、落点判定与插入线（和 tab / 分栏那套分开）
   UI/PaneTreeView.swift       分栏树渲染、分割线、分栏标题栏（窗口小标签 + 新建）
-  UI/DragController.swift     拖拽状态与落点判定
+  UI/DragController.swift     tab 与分栏的拖拽状态与落点判定
   UI/DropIndicatorOverlay.swift  拖拽时的落点高亮与幽灵
-  UI/ClickCatcher.swift       中键点击、带修饰键与点击次数的左键点击（回 AppKit 接）
+  UI/ClickCatcher.swift       中键点击、带修饰键与点击次数的左键点击、左键拖动（回 AppKit 接）
   UI/                         tab 条、终端容器、主机管理与编辑
 
 Sources/MoontermAskpass/      SSH_ASKPASS 助手（独立可执行文件）

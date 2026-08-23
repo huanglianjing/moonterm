@@ -31,6 +31,14 @@ enum ChromeStyle {
     /// 鼠标悬停时的浅浅一层高亮。
     static let hover = Color.white.opacity(0.10)
 
+    /// 小图标按钮（关闭 ✕、新建 +）悬停时的高亮。比 `hover` 重一档 ——
+    /// 它压在已经高亮着的 tab / 小标签上面，同样浓度就看不出来了。
+    static let iconHover = Color.white.opacity(0.20)
+
+    /// 同上，按下去还没松手时。往**暗**的方向走：悬停已经占了「加白」，
+    /// 按下再加白就分不出来了，压暗才一眼能看出「这一下按到了」。
+    static let iconPressed = Color.black.opacity(0.32)
+
     static let accent = Color(nsColor: .controlAccentColor)
 
     /// 当前分栏的焦点边框。系统强调色的亮蓝压在纯黑终端上太扎眼，这里用暗一档的蓝，
@@ -41,6 +49,10 @@ enum ChromeStyle {
     static func selected(emphasized: Bool) -> Color {
         accent.opacity(emphasized ? 0.42 : 0.24)
     }
+
+    /// 主机列表里选中的那几行。这里不跟系统强调色 —— 它可能被改成粉或绿，
+    /// 而「哪几台主机被选中了」得一眼认出来，读作和分栏焦点那圈蓝同一件事。
+    static let selectedRow = Color(red: 0.13, green: 0.38, blue: 0.70)
 
     /// 固定成深色外观。终端是黑的，外壳跟着深色才协调。
     static func applyDarkAppearance() {
@@ -55,6 +67,95 @@ struct ChromeHairline: View {
         Rectangle()
             .fill(ChromeStyle.hairline)
             .frame(height: 1)
+    }
+}
+
+/// 外壳上那些小图标按钮（tab 的关闭 ✕、分栏小标签的 ✕、标题栏与侧栏的 +）。
+///
+/// 图标画得小是为了不抢注意力，但**手不该跟着变准**：可点击范围是一整块正方形
+/// （一般取所在那条栏的高度，正好铺满右侧一格），悬停时整块亮一下、按下去整块压暗，
+/// 让人看清点哪儿有效、也知道这一下按到了。
+struct ChromeIconButton: View {
+
+    let systemName: String
+    /// 正方形的边长，也就是命中范围。
+    let side: CGFloat
+    /// 图标本身的字号 —— 和边长无关，图标该多小还是多小。
+    let iconSize: CGFloat
+    /// 高亮块的圆角，跟所在容器的圆角对齐。
+    var cornerRadius: CGFloat = 4
+    let action: () -> Void
+
+    @State private var isHovering = false
+    /// 自己盯着的按下状态，见下面 `simultaneousGesture` 那段注释。
+    @GestureState private var isPressing = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: iconSize, weight: .bold))
+        }
+        // 按下的状态只有 `ButtonStyle` 拿得到，所以底色画在这儿，不画在 label 里。
+        .buttonStyle(
+            CellStyle(
+                side: side,
+                cornerRadius: cornerRadius,
+                isHovering: isHovering,
+                isPressing: isPressing
+            )
+        )
+        // 分栏小标签那个 ✕ 待在一个自己带拖拽 + 单击 + 双击手势的父视图里，
+        // 祖先手势会把按钮的按下状态压掉（动作照样触发，就是不高亮）。
+        // 所以自己再盯一遍：`simultaneousGesture` 不抢按钮的点击，只用来点亮那块底。
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0).updating($isPressing) { _, pressing, _ in
+                pressing = true
+            }
+        )
+        .onHover { isHovering = $0 }
+    }
+
+    private struct CellStyle: ButtonStyle {
+        let side: CGFloat
+        let cornerRadius: CGFloat
+        let isHovering: Bool
+        let isPressing: Bool
+
+        func makeBody(configuration: Configuration) -> some View {
+            let pressed = configuration.isPressed || isPressing
+            return configuration.label
+                // 图标本身也跟着暗一档：小方块上那层底色变化不一定看得清，
+                // 图标变淡是压在任何底色上都看得见的。
+                .opacity(pressed ? 0.65 : 1)
+                .chromeIconCell(
+                    side: side,
+                    cornerRadius: cornerRadius,
+                    hovering: isHovering,
+                    pressed: pressed
+                )
+        }
+    }
+}
+
+extension View {
+
+    /// 小图标按钮那块方形底：悬停浅高亮、按下压暗。
+    ///
+    /// 单独拆出来是因为侧栏那个 `+` 是个 `Menu` 而不是 `Button`，用不了 `ButtonStyle`，
+    /// 但底该长一个样。
+    func chromeIconCell(
+        side: CGFloat,
+        cornerRadius: CGFloat = 4,
+        hovering: Bool,
+        pressed: Bool = false
+    ) -> some View {
+        frame(width: side, height: side)
+            .background(
+                RoundedRectangle(cornerRadius: cornerRadius)
+                    .fill(pressed ? ChromeStyle.iconPressed : (hovering ? ChromeStyle.iconHover : .clear))
+            )
+            // 图标周围的空白也算命中范围，不然「正方形」只是看着大。
+            .contentShape(Rectangle())
     }
 }
 

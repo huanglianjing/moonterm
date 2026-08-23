@@ -2,35 +2,42 @@ import AppKit
 import MoontermCore
 import SwiftUI
 
-/// 竖栏「主机」图标展开的面板：已保存的主机列成一竖列，单击选中、双击连接。
+/// 竖栏「主机」图标展开的面板：分组在上、未分组的主机垫在最下面，单击选中、双击连接。
 ///
 /// 选择语义照 Finder：⌘ 点单独加减一台，⇧ 点从锚点整段扩选；右键落在选区里就对整个选区操作。
-/// 这里只放常用的几件事（连接、新建、编辑、复制、删除）。排序之类的低频操作留在 ⌘, 的完整面板里。
+/// 拖动也照 Finder：拖一台已经选中的主机 = 拖整片选区；拖分组标题 = 连里面的主机一起换位置。
+///
+/// 这里只放常用的几件事（连接、新建、分组、编辑、复制、删除）。排序之外的低频批量操作
+/// 留在 ⌘, 的完整面板里。
 struct HostSidebarView: View {
 
     @EnvironmentObject private var appState: AppState
+    /// 拖拽状态。只有这个面板用，所以就挂在这儿，不进 `AppState`。
+    @StateObject private var drag = HostDragController()
 
     /// 选中的主机。选择那套语义（重选 / 加减 / 扩选）是 `MoontermCore` 里的纯逻辑，有单测。
     @State private var selection = HostSelection()
     /// 待确认删除的主机，可能是一批。空 = 没在删。删主机会连密码一起删，不能点一下就没了。
     @State private var hostsPendingDeletion: [HostConfig] = []
+    /// 待确认删除的分组。里面的主机不会跟着删，只是移到未分组。
+    @State private var groupPendingDeletion: HostGroup?
+    /// 正在就地改名的分组。新建分组后立刻进这个状态 —— 新建和改名是同一条路。
+    @State private var groupBeingRenamed: UUID?
+    /// 鼠标在标题栏那个 `+` 上。`Menu` 自己不给悬停状态，只能自己接。
+    @State private var isPlusHovering = false
 
-    private var hosts: [HostConfig] { appState.configStore.hosts }
-    private var order: [UUID] { hosts.map { $0.id } }
+    private var store: ConfigStore { appState.configStore }
 
     var body: some View {
         VStack(spacing: 0) {
             header
             ChromeHairline()
 
-            if hosts.isEmpty {
+            if rows.isEmpty {
                 empty
             } else {
                 list
             }
-
-            ChromeHairline()
-            footer
         }
         .frame(maxHeight: .infinity)
         .background(ChromeStyle.sidebar)
@@ -43,12 +50,30 @@ struct HostSidebarView: View {
             presenting: hostsPendingDeletion
         ) { targets in
             Button("删除", role: .destructive) {
-                targets.forEach { appState.configStore.remove(id: $0.id) }
+                targets.forEach { store.remove(id: $0.id) }
                 selection.remove(targets.map { $0.id })
             }
             Button("取消", role: .cancel) {}
         } message: { _ in
             Text("配置和保存的密码都会被删除，此操作不可撤销。已经连上的窗口不受影响。")
+        }
+        .alert(
+            "删除分组「\(groupPendingDeletion?.displayName ?? "")」？",
+            isPresented: Binding(
+                get: { groupPendingDeletion != nil },
+                set: { if !$0 { groupPendingDeletion = nil } }
+            ),
+            presenting: groupPendingDeletion
+        ) { group in
+            Button("删除分组", role: .destructive) {
+                store.removeGroup(id: group.id)
+            }
+            Button("取消", role: .cancel) {}
+        } message: { group in
+            let count = store.hosts(inGroup: group.id).count
+            Text(count == 0
+                 ? "分组是空的，删掉不影响任何主机。"
+                 : "里面的 \(count) 台主机不会被删除，会移到「未分组」的最下面。")
         }
     }
 
@@ -59,6 +84,36 @@ struct HostSidebarView: View {
         return "删除「\(hostsPendingDeletion.first?.displayName ?? "")」？"
     }
 
+    // MARK: - 行
+
+    /// 从上到下看到的每一行。分组在上、未分组垫底；折叠的分组不铺开里面的主机。
+    private var rows: [HostSidebarRowKind] {
+        var result: [HostSidebarRowKind] = []
+        for group in store.groups {
+            result.append(.group(group))
+            if !group.isCollapsed {
+                result.append(contentsOf: store.hosts(inGroup: group.id).map { .host($0) })
+            }
+        }
+        let ungrouped = store.hosts(inGroup: nil)
+        // 一个分组都没有时不必给「未分组」加标题：那时整个列表就是一份平铺的主机表。
+        if !store.groups.isEmpty && !ungrouped.isEmpty {
+            result.append(.ungroupedHeader)
+        }
+        result.append(contentsOf: ungrouped.map { .host($0) })
+        return result
+    }
+
+    /// ⇧ 扩选的顺序按**看到的顺序**算，所以折叠起来的主机不算在内。
+    private var visibleHostIDs: [UUID] {
+        rows.compactMap { row in
+            if case .host(let host) = row { return host.id }
+            return nil
+        }
+    }
+
+    // MARK: - 头尾
+
     private var header: some View {
         HStack(spacing: 4) {
             Text(SidebarPanel.hosts.title)
@@ -67,15 +122,22 @@ struct HostSidebarView: View {
 
             Spacer(minLength: 0)
 
-            Button {
-                appState.beginCreatingHost()
+            Menu {
+                Button("添加主机…") { appState.beginCreatingHost() }
+                Button("添加分组") { addGroup() }
             } label: {
+                // 和 tab 上那些 ✕ 同一块方形底。**没有**按下压暗那一层：`Menu` 不给按下状态，
+                // 换成 `.menuStyle(.button)` + 自定义 buttonStyle 之后菜单直接弹不出来了，
+                // 不值得为一帧的视觉效果拿点得开菜单去换 —— 菜单立刻弹出来本身就是回应。
                 Image(systemName: "plus")
                     .font(.system(size: 10, weight: .bold))
-                    .frame(width: 18, height: 18)
+                    .chromeIconCell(side: 22, hovering: isPlusHovering)
             }
-            .buttonStyle(.plain)
-            .help("新建主机")
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .frame(width: 22, height: 22)
+            .onHover { isPlusHovering = $0 }
+            .help("添加主机或分组")
         }
         .padding(.horizontal, 8)
         .frame(height: 28)
@@ -90,33 +152,90 @@ struct HostSidebarView: View {
 
             Button("新建主机…") { appState.beginCreatingHost() }
                 .controlSize(.small)
+
+            Button("新建分组") { addGroup() }
+                .controlSize(.small)
         }
         .padding(12)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    /// 列表 + 它下面的空白。空白那块要**撑满剩余高度**才点得到 ——
+    /// 光把 ScrollView 拉满没用，能接事件的是里面的内容，内容只有几行高的话下面全是死区。
     private var list: some View {
-        ScrollView {
-            LazyVStack(spacing: 1) {
-                ForEach(hosts) { host in
-                    HostSidebarRow(
-                        host: host,
-                        isSelected: selection.contains(host.id),
-                        openTabCount: appState.tabs.filter { $0.host.id == host.id }.count
-                    ) { clickCount, modifiers in
-                        if clickCount > 1 {
-                            connect([host])
-                        } else {
-                            click(host, modifiers: modifiers)
-                        }
+        GeometryReader { proxy in
+            ScrollView {
+                VStack(spacing: 1) {
+                    ForEach(rows) { row in
+                        view(for: row)
+                            .reportFrame(HostRowFramesKey.self) {
+                                [HostDragController.RowFrame(identity: row.identity, rect: $0)]
+                            }
                     }
-                    .contextMenu { menu(for: host) }
+
+                    // 空白处点一下 = 全部取消选中；拖到这儿松手 = 挪到列表最下面（未分组末尾）。
+                    Color.clear
+                        .frame(minHeight: 8)
+                        .frame(maxHeight: .infinity)
+                        .onLeftClick { _, _ in selection.clear() }
                 }
+                .padding(.horizontal, 4)
+                .padding(.vertical, 4)
+                // 减掉上下 padding，正好填满一屏；多算了会凭空多出几像素可滚。
+                .frame(minHeight: max(0, proxy.size.height - 8), alignment: .top)
             }
-            .padding(.horizontal, 4)
-            .padding(.vertical, 4)
+            .frame(width: proxy.size.width, height: proxy.size.height)
+            .reportFrame(HostListFrameKey.self) { $0 }
+            // 拖拽落点判定要用的几何信息。行的顺序按 y 排好，判定里直接当「从上到下」用。
+            .onPreferenceChange(HostRowFramesKey.self) { frames in
+                drag.rows = frames.sorted { $0.rect.minY < $1.rect.minY }
+            }
+            .onPreferenceChange(HostListFrameKey.self) { frame in
+                drag.listFrame = frame
+            }
+            .overlay(HostDropIndicator(drag: drag))
         }
-        .frame(maxHeight: .infinity)
+    }
+
+    @ViewBuilder
+    private func view(for row: HostSidebarRowKind) -> some View {
+        switch row {
+        case .group(let group):
+            HostGroupHeaderRow(
+                group: group,
+                hostCount: store.hosts(inGroup: group.id).count,
+                isRenaming: groupBeingRenamed == group.id,
+                isBeingDragged: drag.isDragging(.group(group.id)),
+                onToggle: { store.setGroup(id: group.id, collapsed: !group.isCollapsed) },
+                onDrag: { phase in handleGroupDrag(group, phase: phase) },
+                onRename: { name in
+                    store.renameGroup(id: group.id, to: name)
+                    groupBeingRenamed = nil
+                },
+                onCancelRename: { groupBeingRenamed = nil }
+            )
+            .contextMenu { menu(for: group) }
+
+        case .ungroupedHeader:
+            HostSectionHeaderRow(title: "未分组")
+
+        case .host(let host):
+            HostSidebarRow(
+                host: host,
+                isSelected: selection.contains(host.id),
+                isIndented: host.groupID != nil,
+                isBeingDragged: drag.isDraggingHost(host.id),
+                onClick: { clickCount, modifiers in
+                    if clickCount > 1 {
+                        connect([host])
+                    } else {
+                        click(host, modifiers: modifiers)
+                    }
+                },
+                onDrag: { phase in handleHostDrag(host, phase: phase) }
+            )
+            .contextMenu { menu(for: host) }
+        }
     }
 
     // MARK: - 选择
@@ -131,7 +250,63 @@ struct HostSidebarView: View {
         } else {
             kind = .plain
         }
-        selection.click(host.id, kind: kind, in: order)
+        selection.click(host.id, kind: kind, in: visibleHostIDs)
+    }
+
+    // MARK: - 拖动
+
+    private func handleHostDrag(_ host: HostConfig, phase: LeftDragPhase) {
+        switch phase {
+        case .changed(let point):
+            let ids = draggedHostIDs(grabbing: host)
+            drag.update(
+                payload: .hosts(ids),
+                title: ids.count > 1 ? "\(ids.count) 台主机" : host.displayName,
+                from: .host(id: host.id, group: host.groupID),
+                localPoint: point
+            )
+        case .ended:
+            commitDrag()
+        }
+    }
+
+    private func handleGroupDrag(_ group: HostGroup, phase: LeftDragPhase) {
+        switch phase {
+        case .changed(let point):
+            drag.update(
+                payload: .group(group.id),
+                title: group.displayName,
+                from: .groupHeader(group.id),
+                localPoint: point
+            )
+        case .ended:
+            commitDrag()
+        }
+    }
+
+    /// 拖一台已经在选区里的主机 = 拖整片选区（Finder 的规矩）；否则只拖它自己。
+    /// 顺序按列表顺序，落地后的相对次序才和拖之前看到的一致。
+    private func draggedHostIDs(grabbing host: HostConfig) -> [UUID] {
+        guard selection.contains(host.id), selection.count > 1 else { return [host.id] }
+        return store.displayOrderedHostIDs.filter { selection.contains($0) }
+    }
+
+    private func commitDrag() {
+        let state = drag.state
+        drag.end()
+        guard let state else { return }
+
+        switch (state.payload, state.target) {
+        case (.hosts(let ids), .hosts(let group, let before)):
+            store.move(hostIDs: ids, toGroup: group, before: before)
+
+        case (.group(let id), .group(let before)):
+            store.moveGroup(id: id, before: before)
+
+        default:
+            // 落在列表外面（或落点就是原位）：什么都不做。
+            break
+        }
     }
 
     // MARK: - 操作
@@ -141,6 +316,12 @@ struct HostSidebarView: View {
         targets.forEach { appState.open(host: $0) }
     }
 
+    private func addGroup() {
+        let group = store.addGroup()
+        // 新建完直接进改名状态：省掉「先建再改」两步，也不用为它单开一个弹窗。
+        groupBeingRenamed = group.id
+    }
+
     @ViewBuilder
     private func menu(for host: HostConfig) -> some View {
         let targets = menuTargets(for: host)
@@ -148,51 +329,250 @@ struct HostSidebarView: View {
         if targets.count > 1 {
             Button("连接选中的 \(targets.count) 台") { connect(targets) }
             Divider()
+            moveMenu(for: targets)
+            Divider()
             Button("删除选中的 \(targets.count) 台…") { hostsPendingDeletion = targets }
         } else {
             Button("连接") { connect(targets) }
             Button("编辑…") { appState.beginEditing(host: host) }
-            Button("复制") { appState.configStore.duplicate(id: host.id) }
+            Button("复制") { store.duplicate(id: host.id) }
+            Divider()
+            moveMenu(for: targets)
             Divider()
             Button("删除…") { hostsPendingDeletion = targets }
         }
     }
 
-    private func menuTargets(for host: HostConfig) -> [HostConfig] {
-        let ids = selection.targets(rightClicking: host.id, in: order)
-        return hosts.filter { ids.contains($0.id) }
+    /// 不想拖的时候也能换分组 —— 分组一多，拖到看不见的地方并不方便。
+    ///
+    /// 只列**真的能去**的地方：一个分组都没建时就一条灰着的说明；选中的几台都在同一段里时，
+    /// 那一段不出现（移到自己已经在的地方没有意义）；散落在不同段时全都列出来。
+    @ViewBuilder
+    private func moveMenu(for targets: [HostConfig]) -> some View {
+        // 去处的取舍是 `ConfigStore` 那边的纯逻辑（有单测），这里只管画。
+        let destinations = store.moveDestinations(forHostIDs: targets.map { $0.id })
+
+        Menu("移到分组") {
+            if destinations.isEmpty {
+                // 一个分组都还没建：留一条灰着的说明，比一个空菜单好懂。
+                Button("未创建分组") {}
+                    .disabled(true)
+            } else {
+                ForEach(destinations, id: \.self) { destination in
+                    switch destination {
+                    case .group(let group):
+                        Button(group.displayName) { move(targets, toGroup: group.id) }
+
+                    case .ungrouped:
+                        // 未分组永远排在最后，前面有分组时才需要这条分隔线。
+                        if destinations.count > 1 {
+                            Divider()
+                        }
+                        Button("未分组") { move(targets, toGroup: nil) }
+                    }
+                }
+            }
+        }
     }
 
-    private var footer: some View {
-        Button {
-            appState.isHostManagerPresented = true
-        } label: {
-            HStack(spacing: 4) {
-                Image(systemName: "slider.horizontal.3")
-                    .font(.system(size: 9))
-                Text("管理主机…")
-                    .font(.system(size: 11))
-                Spacer(minLength: 0)
-            }
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 8)
-            .frame(height: 26)
-            .contentShape(Rectangle())
+    private func move(_ targets: [HostConfig], toGroup group: UUID?) {
+        store.move(hostIDs: targets.map { $0.id }, toGroup: group, before: nil)
+    }
+
+    @ViewBuilder
+    private func menu(for group: HostGroup) -> some View {
+        Button("在此分组新建主机…") { appState.beginCreatingHost(inGroup: group.id) }
+        Button(group.isCollapsed ? "展开" : "折叠") {
+            store.setGroup(id: group.id, collapsed: !group.isCollapsed)
         }
-        .buttonStyle(.plain)
-        .help("排序、批量管理（⌘,）")
+        Button("重命名") { groupBeingRenamed = group.id }
+        Divider()
+        Button("删除分组…") { groupPendingDeletion = group }
+    }
+
+    private func menuTargets(for host: HostConfig) -> [HostConfig] {
+        let ids = selection.targets(rightClicking: host.id, in: visibleHostIDs)
+        return ids.compactMap { id in store.host(id: id) }
     }
 }
+
+// MARK: - 行的种类
+
+/// 列表里的一行。`ForEach` 用它当数据源，`identity` 是拖拽落点判定用的那份身份。
+private enum HostSidebarRowKind: Identifiable {
+    case group(HostGroup)
+    case ungroupedHeader
+    case host(HostConfig)
+
+    var id: String {
+        switch self {
+        case .group(let group): return "group-\(group.id)"
+        case .ungroupedHeader: return "ungrouped"
+        case .host(let host): return "host-\(host.id)"
+        }
+    }
+
+    var identity: HostRowIdentity {
+        switch self {
+        case .group(let group): return .groupHeader(group.id)
+        case .ungroupedHeader: return .ungroupedHeader
+        case .host(let host): return .host(id: host.id, group: host.groupID)
+        }
+    }
+}
+
+// MARK: - 分组标题行
+
+/// 分组标题行。点一下折叠/展开，拖动可以给分组换位置。
+///
+/// 折叠**在松手时才生效**（`clickOnRelease`）：折叠和拖动共用同一片区域，按下就折叠的话
+/// 一开拖列表就先跳一下，落点全乱。
+private struct HostGroupHeaderRow: View {
+
+    let group: HostGroup
+    let hostCount: Int
+    let isRenaming: Bool
+    let isBeingDragged: Bool
+    let onToggle: () -> Void
+    let onDrag: (LeftDragPhase) -> Void
+    let onRename: (String) -> Void
+    let onCancelRename: () -> Void
+
+    @State private var isHovering = false
+
+    var body: some View {
+        content
+            .padding(.horizontal, 6)
+            .padding(.vertical, 4)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 5)
+                    .fill(isHovering && !isRenaming ? ChromeStyle.hover : .clear)
+            )
+            .contentShape(Rectangle())
+            .opacity(isBeingDragged ? 0.4 : 1)
+            .onHover { isHovering = $0 }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if isRenaming {
+            // 改名时不挂点击层：否则这层会把点击吃掉，光标点不进输入框。
+            HStack(spacing: 4) {
+                chevron
+                HostGroupNameField(
+                    initialName: group.name,
+                    onCommit: onRename,
+                    onCancel: onCancelRename
+                )
+            }
+        } else {
+            label
+                .onLeftMouse(click: { _, _ in onToggle() }, drag: onDrag, clickOnRelease: true)
+                .help("\(hostCount) 台主机（点一下折叠/展开，拖动可换位置）")
+        }
+    }
+
+    private var label: some View {
+        HStack(spacing: 4) {
+            chevron
+
+            Text(group.displayName)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+
+            // 主机台数只放在 tooltip 里，行上不挂数字 —— 列表要干净。
+            Spacer(minLength: 0)
+        }
+    }
+
+    private var chevron: some View {
+        Image(systemName: group.isCollapsed ? "chevron.right" : "chevron.down")
+            .font(.system(size: 8, weight: .bold))
+            .foregroundStyle(.secondary)
+            .frame(width: 10)
+    }
+}
+
+/// 「未分组」那条标题行。纯标签：它既不能折叠也不能拖 —— 未分组永远垫在最下面。
+private struct HostSectionHeaderRow: View {
+
+    let title: String
+
+    var body: some View {
+        Text(title)
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(.tertiary)
+            .padding(.horizontal, 6)
+            .padding(.top, 6)
+            .padding(.bottom, 2)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// 分组就地改名：回车或点别处确认，Esc 放弃，清空则退回默认名。
+private struct HostGroupNameField: View {
+
+    let initialName: String
+    let onCommit: (String) -> Void
+    let onCancel: () -> Void
+
+    @State private var draft = ""
+    /// 提交与放弃都只能发生一次：Esc 之后输入框会失焦，别再把草稿又提交一遍。
+    @State private var isSettled = false
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        TextField("", text: $draft)
+            .textFieldStyle(.plain)
+            .font(.system(size: 11, weight: .semibold))
+            .focused($isFocused)
+            .frame(height: 16)
+            .padding(.horizontal, 4)
+            .background(
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(Color.black.opacity(0.45))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 4)
+                    .strokeBorder(ChromeStyle.accent, lineWidth: 1)
+            )
+            .onAppear {
+                draft = initialName
+                isFocused = true
+            }
+            .onSubmit { settle { onCommit(draft) } }
+            .onExitCommand { settle(onCancel) }
+            .onChange(of: isFocused) { focused in
+                // 点到别处 = 确认，和 Finder 改文件名一致。
+                guard !focused else { return }
+                settle { onCommit(draft) }
+            }
+            .help("回车确认，Esc 取消")
+    }
+
+    private func settle(_ body: () -> Void) {
+        guard !isSettled else { return }
+        isSettled = true
+        body()
+    }
+}
+
+// MARK: - 主机行
 
 /// 列表里的一行主机。单击选中，双击连接（每次双击都是一个新 tab，同一台主机开几个都行）。
 private struct HostSidebarRow: View {
 
     let host: HostConfig
     let isSelected: Bool
-    /// 这台主机当前开着几个 tab。0 就不显示。
-    let openTabCount: Int
+    /// 在某个分组里：名字往右缩一格，看出层级。
+    let isIndented: Bool
+    let isBeingDragged: Bool
     /// 点击次数 + 修饰键，选择与打开的判定都交给列表那边做。
     let onClick: (Int, NSEvent.ModifierFlags) -> Void
+    let onDrag: (LeftDragPhase) -> Void
 
     @State private var isHovering = false
 
@@ -212,34 +592,24 @@ private struct HostSidebarRow: View {
             }
 
             Spacer(minLength: 0)
-
-            if openTabCount > 0 {
-                Text("\(openTabCount)")
-                    .font(.system(size: 9, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 1)
-                    .background(
-                        Capsule().fill(Color.white.opacity(0.10))
-                    )
-                    .help("已经开着 \(openTabCount) 个标签页")
-            }
         }
-        .padding(.horizontal, 6)
+        .padding(.leading, isIndented ? 18 : 6)
+        .padding(.trailing, 6)
         .padding(.vertical, 4)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 5)
                 .fill(background)
         )
+        .opacity(isBeingDragged ? 0.4 : 1)
         .contentShape(Rectangle())
         .onHover { isHovering = $0 }
-        .onLeftClick(perform: onClick)
-        .help("\(host.endpointDescription)（单击选中，双击连接；⌘ / ⇧ 点可多选）")
+        .onLeftMouse(click: onClick, drag: onDrag)
+        .help("\(host.endpointDescription)（单击选中，双击连接；⌘ / ⇧ 点可多选，拖动可排序、换分组）")
     }
 
     private var background: Color {
-        if isSelected { return ChromeStyle.selected(emphasized: false) }
+        if isSelected { return ChromeStyle.selectedRow }
         return isHovering ? ChromeStyle.hover : .clear
     }
 }
