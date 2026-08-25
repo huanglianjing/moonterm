@@ -223,8 +223,9 @@ private struct PaneHeaderBar: View {
     /// 各标签的矩形，供拖拽落点判定用（子视图上报，本视图汇总后再往上报）。
     @State private var chips: [DragController.Chip] = []
 
-    /// 这条栏的高度，同时也是那个 `+` 方块的边长。
-    fileprivate static let height: CGFloat = 20
+    /// 这条栏的高度，同时也是那个 `+` 方块的边长。比 tab 条略矮 ——
+    /// 它是分栏内部的东西，压满和 tab 条一样高会跟 tab 抢层级。
+    fileprivate static let height: CGFloat = 30
 
     var body: some View {
         HStack(spacing: 2) {
@@ -280,8 +281,15 @@ private struct PaneChip: View {
 
     @State private var isHovering = false
 
-    /// 小标签的高度，同时也是右端那个关闭方块的边长。
-    private static let height: CGFloat = 16
+    /// 小标签的高度。字号和 tab 一样，但比 tab 矮一档。
+    fileprivate static let height: CGFloat = 26
+    /// 右端关闭方块的边长（命中范围）。取得比标签矮一点：
+    /// 铺满整个高度的话，图标周围那圈余量就成了名字和 ✕ 之间一道明显的空隙。
+    private static let closeSide: CGFloat = 22
+    /// 圆角。底和那圈绿边共用，改名输入框也跟着它。
+    fileprivate static let cornerRadius: CGFloat = 4
+    /// 窗口名的字号，和 tab 标题一样大。
+    fileprivate static let fontSize: CGFloat = 12
 
     private var isRenaming: Bool { appState.sessionBeingRenamed == session.id }
 
@@ -310,15 +318,15 @@ private struct PaneChip: View {
             // 宽度跟着名字走：给 Text 套 maxWidth 会让它把剩余空间全占掉，
             // 短名字左右就多出一大片空白。长度上限交给模型层（`TerminalTab.maximumNameLength`）。
             Text(name)
-                .font(.system(size: 11))
+                .font(.system(size: PaneChip.fontSize))
                 .lineLimit(1)
                 .truncationMode(.middle)
 
             // 一直占着位置，只改透明度 —— 否则鼠标一进来标签就变宽。
-            // 命中范围是小标签右端一整块正方形（边长 = 标签高度）；看不见时不接点击，别误关窗口。
+            // 命中范围是小标签右端一整块正方形；看不见时不接点击，别误关窗口。
             ChromeIconButton(
                 systemName: "xmark",
-                side: Self.height,
+                side: Self.closeSide,
                 iconSize: 7
             ) {
                 appState.closeSession(sessionID: session.id)
@@ -327,11 +335,19 @@ private struct PaneChip: View {
             .allowsHitTesting(isCloseVisible)
             .help("关闭（⌘W）")
         }
+        // 当前显示的那个标签：黑底 + 一圈绿边 + 绿字，和它下面那块终端读作一件事。
+        // 名字和 ✕ 一起变绿（状态圆点有自己的颜色，不受影响）。
+        .foregroundStyle(isShown ? ChromeStyle.paneChipText(emphasized: isFocused) : Color.primary)
         .padding(.leading, 5)
         .frame(height: Self.height)
         .background(
-            RoundedRectangle(cornerRadius: 4)
+            RoundedRectangle(cornerRadius: Self.cornerRadius)
                 .fill(background)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: Self.cornerRadius)
+                .strokeBorder(ChromeStyle.paneChipBorder(emphasized: isFocused), lineWidth: 1)
+                .opacity(isShown ? 1 : 0)
         )
         .contentShape(Rectangle())
         .onHover { isHovering = $0 }
@@ -356,7 +372,7 @@ private struct PaneChip: View {
     }
 
     private var background: Color {
-        if isShown { return ChromeStyle.selected(emphasized: isFocused) }
+        if isShown { return ChromeStyle.paneChipBackground }
         return isHovering ? ChromeStyle.hover : .clear
     }
 
@@ -380,8 +396,8 @@ private struct PaneNameField: View {
     @State private var isSettled = false
     @FocusState private var isFocused: Bool
 
-    /// 字号，和小标签上的名字保持一致。
-    private static let fontSize: CGFloat = 11
+    /// 字号，和小标签上的名字保持一致 —— 宽度是按这个字号量出来的，两边不一致就会跳一下。
+    private static let fontSize: CGFloat = PaneChip.fontSize
 
     var body: some View {
         TextField("", text: $draft)
@@ -389,15 +405,17 @@ private struct PaneNameField: View {
             .font(.system(size: Self.fontSize))
             .focused($isFocused)
             // 宽度按当前内容量出来，只多留一个光标的位置 —— 固定宽度的方框在短名字上空得难看。
-            .frame(width: fieldWidth, height: 16)
+            .frame(width: fieldWidth, height: PaneChip.height)
             .padding(.horizontal, 5)
             .background(
-                RoundedRectangle(cornerRadius: 4)
+                RoundedRectangle(cornerRadius: PaneChip.cornerRadius)
                     .fill(Color.black.opacity(0.45))
             )
+            // 边框跟着小标签走那圈绿：它占的就是小标签的位置，蓝边在这儿会突兀。
+            // 字保持默认的白 —— 正在编辑和已经定下来的名字得看得出区别。
             .overlay(
-                RoundedRectangle(cornerRadius: 4)
-                    .strokeBorder(ChromeStyle.accent, lineWidth: 1)
+                RoundedRectangle(cornerRadius: PaneChip.cornerRadius)
+                    .strokeBorder(ChromeStyle.paneChipBorder(emphasized: true), lineWidth: 1)
             )
             .onAppear {
                 draft = initialName

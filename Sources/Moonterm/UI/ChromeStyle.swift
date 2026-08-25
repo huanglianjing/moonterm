@@ -50,6 +50,23 @@ enum ChromeStyle {
         accent.opacity(emphasized ? 0.42 : 0.24)
     }
 
+    /// 分栏小标签「当前显示的那个」用的绿。终端里的字就是这种绿，
+    /// 小标签黑底绿字绿边，读起来和它底下那块终端是一件事，不像块贴上去的蓝方块。
+    private static let terminalGreen = Color(red: 0.30, green: 0.85, blue: 0.42)
+
+    /// 小标签选中时的底色：和终端一个底，纯黑。
+    static let paneChipBackground = Color.black
+
+    /// 小标签那圈绿边。`emphasized` = 键盘焦点就在这一栏，绿得实一档。
+    static func paneChipBorder(emphasized: Bool) -> Color {
+        terminalGreen.opacity(emphasized ? 1 : 0.55)
+    }
+
+    /// 小标签上的绿字（连右端那个 ✕）。比边框淡一点，边框才是「圈住」的那一笔。
+    static func paneChipText(emphasized: Bool) -> Color {
+        terminalGreen.opacity(emphasized ? 1 : 0.8)
+    }
+
     /// 主机列表里选中的那几行。这里不跟系统强调色 —— 它可能被改成粉或绿，
     /// 而「哪几台主机被选中了」得一眼认出来，读作和分栏焦点那圈蓝同一件事。
     static let selectedRow = Color(red: 0.13, green: 0.38, blue: 0.70)

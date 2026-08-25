@@ -37,7 +37,7 @@ struct TabBarView: View {
             }
             .padding(.horizontal, 4)
         }
-        .frame(height: 32)
+        .frame(height: 36)
         .background(ChromeStyle.bar)
         .reportFrame(TabBarFrameKey.self) { $0 }
         // 拖拽落点判定要用的几何信息。
@@ -63,9 +63,9 @@ private struct TabItemView: View {
     @State private var isHovering = false
 
     /// tab 的高度。
-    private static let height: CGFloat = 26
+    private static let height: CGFloat = 30
     /// 右端关闭方块的边长（命中范围）。比 tab 略矮，见 body 里那段注释。
-    private static let closeSide: CGFloat = 20
+    private static let closeSide: CGFloat = 24
 
     /// 关闭按钮什么时候露出来：鼠标在这个 tab 上，或者它就是当前 tab。
     private var isCloseVisible: Bool { isHovering || isSelected }
@@ -89,7 +89,7 @@ private struct TabItemView: View {
                     .help("\(tab.sessionCount) 个窗口 · \(tab.paneCount) 个分栏")
             }
 
-            // 命中范围是一整块正方形，但边长取得比 tab 矮一点：铺满 26 点的话，
+            // 命中范围是一整块正方形，但边长取得比 tab 矮一点：铺满 30 点的话，
             // 图标周围那圈余量就成了标题和 ✕ 之间一道明显的空隙。
             // 看不见的时候不接点击 —— 那块地方挺大，不能让人误关。
             ChromeIconButton(
