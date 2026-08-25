@@ -29,10 +29,13 @@ public enum SSHCommandBuilder {
     ///   - config: 主机配置。
     ///   - askpass: 密码非空时传入（askpass 助手路径 + 密码文件路径）；为 nil 表示不用密码，
     ///              交给 ssh 自己决定认证方式（公钥、agent、或在终端里手动输密码）。
+    ///   - controlPath: 这条连接的 ControlMaster socket 路径，文件面板靠它复用同一条连接跑 sftp
+    ///                  （详见下面 ControlMaster 那段注释）。nil = 不开多路复用。
     ///   - baseEnvironment: 终端仿真器给出的基础环境变量（TERM/LANG 等）。
     public static func makePlan(
         config: HostConfig,
         askpass: (helperPath: String, secretPath: String)?,
+        controlPath: String? = nil,
         baseEnvironment: [String]
     ) -> SSHLaunchPlan {
 
@@ -45,6 +48,18 @@ public enum SSHCommandBuilder {
             "-o", "ServerAliveCountMax=3",
             "-o", "ConnectTimeout=15"
         ]
+
+        if let controlPath {
+            // 开一条 ControlMaster：文件面板的 sftp 复用**这一条已经认证过的连接**，
+            // 于是列目录和传文件都不用再走一遍认证，密码全程只在这里出现一次。
+            //
+            // socket 路径是**每个会话一份**，不是每台主机一份 —— 同一 tab 里几个分栏各自独立。
+            // 换成按主机共享的话，当 master 的那个分栏一断，同主机其他分栏会跟着一起掉。
+            arguments += [
+                "-o", "ControlMaster=auto",
+                "-o", "ControlPath=\(controlPath)"
+            ]
+        }
 
         if askpass != nil {
             // 配了密码就只走密码类认证：省掉公钥失败的等待，也不会弹私钥 passphrase。

@@ -52,6 +52,10 @@ final class AppState: ObservableObject {
     static let maximumSidebarWidth: CGFloat = 420
     static let defaultSidebarWidth: CGFloat = 220
 
+    /// 文件面板的浏览状态，一个 tab 一份（tab 与主机一一对应，所以路径在各分栏间通用）。
+    /// tab 关掉就跟着扔掉。
+    private var fileBrowsers: [UUID: RemoteFileBrowser] = [:]
+
     private static let fontSizeKey = "terminalFontSize"
     private static let sidebarPanelKey = "activeSidebarPanel"
     private static let sidebarWidthKey = "sidebarWidth"
@@ -260,6 +264,7 @@ final class AppState: ObservableObject {
     func closeOtherTabs(keeping tabID: UUID) {
         for tab in tabs where tab.id != tabID {
             tab.sessionIDs.forEach { destroySession($0) }
+            fileBrowsers.removeValue(forKey: tab.id)
         }
         tabs.removeAll { $0.id != tabID }
         selectedTabID = tabID
@@ -271,6 +276,7 @@ final class AppState: ObservableObject {
         sessionObservations.removeAll()
         sessions.removeAll()
         tabs.removeAll()
+        fileBrowsers.removeAll()
         selectedTabID = nil
         sessionBeingRenamed = nil
     }
@@ -315,6 +321,8 @@ final class AppState: ObservableObject {
 
     private func removeTab(at index: Int) {
         let removed = tabs.remove(at: index)
+        // 文件面板的浏览状态跟 tab 同生死（里面还挂着没传完的 sftp 进程，扔掉时会一起掐掉）。
+        fileBrowsers.removeValue(forKey: removed.id)
         guard selectedTabID == removed.id else { return }
         // 优先选右边那个，没有就选左边。
         let fallback = min(index, tabs.count - 1)
@@ -530,6 +538,17 @@ final class AppState: ObservableObject {
     /// 需要选主机时（⌘T / 关掉最后一个 tab 之后）把主机面板露出来。
     func revealHosts() {
         activeSidebar = .hosts
+    }
+
+    /// 某个 tab 的文件面板状态，第一次要用时才建。
+    ///
+    /// 挂在 tab 上而不是会话上：同一个 tab 的几个分栏是同一台主机，看到的该是同一棵树，
+    /// 切个分栏不该把展开的目录全收回去。
+    func fileBrowser(for tab: TerminalTab) -> RemoteFileBrowser {
+        if let existing = fileBrowsers[tab.id] { return existing }
+        let browser = RemoteFileBrowser(host: tab.host)
+        fileBrowsers[tab.id] = browser
+        return browser
     }
 
     /// 拖面板右边缘。宽度夹在上下限之间：太窄看不清主机名，太宽把终端挤没了。

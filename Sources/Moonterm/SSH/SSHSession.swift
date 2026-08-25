@@ -44,11 +44,33 @@ final class SSHSession: NSObject, ObservableObject, Identifiable, LocalProcessTe
     let config: HostConfig
     private let password: String
 
+    /// 这条连接的 ControlMaster socket。
+    ///
+    /// 文件面板的 sftp 靠它复用**这条已经认证过的连接**（见 `SFTPCommandBuilder.makePlan`），
+    /// 所以列目录和传文件都不用再认证一次，密码只在下面 `launch()` 里出现那一次。
+    /// 一个会话一份，不跟同主机的其他分栏共享 —— 共享的话当 master 的那栏一断，其余的会一起掉。
+    let controlPath = MoontermPaths.newControlSocketPath()
+
     // MARK: - 对外状态
 
     @Published private(set) var state: State = .connecting
     /// 远端通过 OSC 设置的标题（用于窗口标题栏）。
     @Published private(set) var remoteTitle: String?
+
+    /// 远端 shell 当前所在目录，文件面板用它「定位到当前目录」。nil = 还没探到。
+    ///
+    /// 只能靠远端主动吐出来的东西猜（OSC 7 优先，没有就解析 xterm 标题），
+    /// 判定逻辑在 `RemoteCwdParser` 里，有单测。`home` 这一路要等文件面板问出家目录才补上，
+    /// 所以这里存的是**原始线索**，展开成绝对路径是 `remoteDirectory(home:)` 的事。
+    @Published private(set) var osc7Directory: String?
+
+    /// 已经连上、并且 ControlMaster socket 应该就位了 —— 文件面板据此决定要不要发 sftp。
+    var isMultiplexReady: Bool { state == .connected }
+
+    /// 结合家目录算出的当前目录。两条线索都不可用时 nil。
+    func remoteDirectory(home: String?) -> String? {
+        RemoteCwdParser.resolve(osc7: osc7Directory, title: remoteTitle, home: home)
+    }
 
     let terminalView: SSHTerminalView
 
@@ -117,6 +139,9 @@ final class SSHSession: NSObject, ObservableObject, Identifiable, LocalProcessTe
         }
         askpass?.cleanup()
         askpass = nil
+        // ssh 退出时自己会删 socket；这里再删一次是给「被 SIGKILL 掉」之类的情况兜底，
+        // 免得临时目录里越积越多。
+        unlink(controlPath)
     }
 
     private func launch() {
@@ -143,6 +168,7 @@ final class SSHSession: NSObject, ObservableObject, Identifiable, LocalProcessTe
         let plan = SSHCommandBuilder.makePlan(
             config: config,
             askpass: askpassPair,
+            controlPath: controlPath,
             baseEnvironment: Terminal.getEnvironmentVariables(termName: "xterm-256color")
         )
 
@@ -180,7 +206,9 @@ final class SSHSession: NSObject, ObservableObject, Identifiable, LocalProcessTe
     }
 
     func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {
-        // 核心版不用当前目录。
+        // OSC 7（`\e]7;file://host/path`）。远端配了才有 —— Linux 发行版默认都不发，
+        // 所以文件面板还留了「解析 xterm 标题」那条兜底路径。
+        osc7Directory = directory
     }
 
     func processTerminated(source: TerminalView, exitCode: Int32?) {

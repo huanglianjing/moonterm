@@ -126,6 +126,11 @@ struct AppCommands: Commands {
             }
             .keyboardShortcut("b", modifiers: .command)
 
+            Button(appState.activeSidebar == .files ? "隐藏文件面板" : "显示文件面板") {
+                appState.toggleSidebar(.files)
+            }
+            .keyboardShortcut("b", modifiers: [.command, .shift])
+
             Divider()
 
             Button("放大字号") {

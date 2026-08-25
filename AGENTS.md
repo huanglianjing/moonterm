@@ -63,6 +63,18 @@ Tests/MoontermCoreTests/
 4. **主机顺序只有 `ConfigStore.hosts` 这一份数组。** 分组只是把这份顺序切成几段展示（`sections`），所以「排到某个分组末尾」等价于「排到数组末尾」。不要再引入第二份顺序。
 5. **一个 tab 固定一台主机。** 主机与窗口编号都绑在 tab 上，会话不跨 tab 搬动；`DragController` 在落点判定阶段就把「tab → 分栏」「分栏 → tab 条」判成无效。
 6. **askpass 助手必须和主程序同目录** —— `AskpassBridge.locateHelper()` 就是这么找的，改打包脚本时别拆开。
+7. **文件面板的远端操作一律复用会话的 ControlMaster socket，不再单独认证。** socket 是**每会话**一份
+   （`SSHSession.controlPath`）—— 别改成按主机共享：当 master 的那个分栏一断，同主机其他分栏会跟着一起掉。
+   sftp 那边固定带 `ControlMaster=no` + `BatchMode=yes`，只复用、不新建、绝不提问（master 不在时要快速失败，不能挂住）。
+8. **列目录必须是 `ls -lan`，`-n` 不能去掉。** 不带 `-n` 时 sftp 打印的是**服务端给的 longname**，格式随服务端实现变；
+   带上才是 sftp 客户端本地格式化的固定格式，`SFTPListingParser` 就是照它写的。
+9. **sftp 进程必须带 UTF-8 的 `LC_ALL`**（`SFTPCommandBuilder.forcedEnvironment`）。少了它，非 ASCII 文件名会被按
+   八进制转义打出来，而转义后的名字再拿去 `get` 是**找不到文件**的 —— 不只是显示问题。
+   从 `.app` 启动时环境里没有 `LANG`，别指望继承。`SFTPRunner` 是把它**叠加**在继承环境上，不能整套替换（会弄丢 `HOME`，ssh 就找不到 `~/.ssh`）。
+10. **sftp 路径参数只转义 `\` 和 `"`。** 双引号本身就把 glob 关掉了（实测：不加引号 `star*.txt` 会匹配到 `starX.txt`，
+    加了只命中字面那个）；给 `*` `?` `[` 补反斜杠反而会让 sftp 去找一个名字里真带反斜杠的文件。
+11. **批处理脚本不加 sftp 的 `-` 前缀**（「这条错了也接着跑」）。加了它 sftp 一律以退出码 0 收场，
+    失败判定就只能去猜 stderr；保留「一错即退」退出码才是可信信号，而已经跑完的那几条输出照样能用。
 7. 配置文件写盘走 `SecureFile`（原子写 + `0600`），`hosts.json` 带 `version` 字段，改结构要考虑迁移（v1 没有 `groups` 字段，解出来是 nil）。
 
 ## 已定决策，不要重开
@@ -70,6 +82,24 @@ Tests/MoontermCoreTests/
 - **密码明文存 `secrets.json`（权限 0600）是用户明确的选择**，不要擅自改成钥匙串，也不要在回答里反复劝。代码里有 `SecretStore` 协议就是留好替换口子；只有用户重新提出时才实现 Keychain 版本。
 - 密码通过 `SSH_ASKPASS` + `SSH_ASKPASS_REQUIRE=force` 传给 ssh，不出现在命令行。另有一条「检测到密码提示再写入 PTY」的兜底路径，**只在连接后 20 秒内有效且只触发一次** —— 这个限制是为了不把 SSH 密码误灌给远端的 `sudo` 提示，不要放宽。
 - 选主机只有左侧主机面板这一处入口：tab 条上没有 `+`，`⌘T` 就是展开那个面板。
+
+## 不用远端主机也能验证 SFTP
+
+`swift test` 里的 `SFTPRunnerLocalTests` 用的是 sftp 自带的 `-D`：
+
+```bash
+printf 'ls -lan "/tmp"\n' | sftp -q -b - -D /usr/libexec/sftp-server
+```
+
+它把 sftp-server 当子进程直接起在本地，走真的 SFTP 协议，只是省掉 ssh 那一段 —— 引号规则、
+输出格式、批处理分帧都能这么验，不需要网络也不需要一台可连的主机。**测不到的只有认证与 ControlMaster 复用。**
+
+那两样要真远端。本机可以临时起一个只监听 127.0.0.1 的 sshd（非 root 也能起，但只能用密钥认证，
+因为验证密码需要 root）：`/usr/sbin/sshd -f <自己的 config> -E <log>`，config 里写 `Port 2222`、
+`ListenAddress 127.0.0.1`、`HostKey <临时密钥>`、`AuthorizedKeysFile <临时公钥>`、`UsePAM no`、`StrictModes no`。
+注意 **ssh-agent 用不上**（`SSH_AUTH_SOCK` 不在 SwiftTerm 传给子进程的环境变量里），
+所以密钥得放到 `~/.ssh/id_ed25519`；验证完记得删掉，并把 `known_hosts` 里那条 `[127.0.0.1]:2222` 清掉
+（**别用 `ssh-keygen -R`**：它会把已有的 `~/.ssh/known_hosts.old` 覆盖掉）。
 
 ## 跑 App 做界面验证的坑
 
@@ -80,6 +110,12 @@ Tests/MoontermCoreTests/
 - **裸二进制 `.build/debug/Moonterm` 无法激活到前台**，收不到 keystroke。要发键就拷进一个临时 bundle（`/tmp/XxxDemo.app/...` + `codesign -s -`，名字**故意和真 App 不同**方便按进程名区分），直接跑 bundle 里的可执行文件（这样 stderr 还能重定向到文件；用 `open -a` 拿不到日志）。发键前必须校验前台进程的 unix id 是自己那个。
 - 截图用 `CGWindowListCopyWindowInfo` 按 ownerPID 找 window id 再 `screencapture -l <id>`，**不要全屏截图**（会拍到用户的桌面）。
 - **合成鼠标拖拽这台机器做不到**（没有 python Quartz、没有 cliclick，System Events 不支持 drag），拖拽类交互只能请用户自己试。
+- **点击可以合成，但要自己写**：没有 python Quartz，拿 `swiftc` 编一个几十行的小工具即可 ——
+  `CGWindowListCopyWindowInfo` 按 ownerPID 拿窗口位置，再 `CGEvent(mouseEventSource:...)` + `setIntegerValueField(.mouseEventClickState,...)`
+  发单击/双击（窗口相对坐标 = 截图像素 ÷ 2，Retina）。**右键唤出 `contextMenu` 这条路合成不出来**，右键菜单只能请用户自己试。
+- **别用 AppleScript `keystroke` 发长字符串**：中文输入法会把它打乱（`sh /tmp/x` 变成 `/&&/tmp/x`）。
+  可靠办法是 `pbcopy` + `⌘V`（终端支持粘贴），**用完把用户的剪贴板还原回去**。
+- 移动过鼠标要还原原位（`CGEvent(source: nil)?.location` 先记下来）。
 - 需要造出 tab / 分栏这类得点击才有的状态，可以临时在 `MoontermApp.onAppear` 里按 `--ui-demo` 启动参数直接调 `appState.open(host:)`（假主机指 `127.0.0.1:1`，不碰真机器），验证完 `git checkout` 掉。
 
 ## 沟通

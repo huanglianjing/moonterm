@@ -1,0 +1,504 @@
+import Combine
+import Foundation
+import MoontermCore
+
+/// 「文件」面板背后的状态：当前看的是哪个目录、树展开了哪几支、以及正在传的文件。
+///
+/// **一个 tab 一份**（`AppState.fileBrowser(for:)`）。tab 与主机一一对应，所以同一个 tab 里
+/// 几个分栏看到的是同一棵树；具体发 sftp 时用的是**当前聚焦那个分栏**的 ControlMaster socket
+/// （见 `bind(session:)`），因为 socket 是每会话一份的。
+///
+/// 树根是**当前目录**而不是 `/`：侧栏很窄，从根一级级缩进到 `/home/me/app/logs` 之后
+/// 名字就只剩几个字了。往上走靠顶部的面包屑。
+final class RemoteFileBrowser: ObservableObject {
+
+    // MARK: - 传输
+
+    struct Transfer: Identifiable {
+
+        enum Direction {
+            case download
+            case upload
+        }
+
+        enum State: Equatable {
+            /// 排在队里等前面的传完（同时最多两个，见 `maximumConcurrentTransfers`）。
+            case queued
+            case running
+            case finished
+            case failed(String)
+        }
+
+        let id = UUID()
+        let name: String
+        let direction: Direction
+        /// 总字节数。下载时来自 `ls` 的结果，上传时来自本地文件；目录传输是 nil（没法预先知道）。
+        let totalBytes: UInt64?
+        /// 已传字节数。**只有下载能测**（轮询本地落地文件的大小）；上传是 nil。
+        var bytesDone: UInt64?
+        var state: State = .queued
+
+        var isDone: Bool {
+            switch state {
+            case .finished, .failed: return true
+            case .queued, .running: return false
+            }
+        }
+
+        /// 0…1 的进度。测不出来时 nil，界面上画成不确定的样子。
+        ///
+        /// sftp 的进度条只在 stdout 是 tty 时才输出（实测：批处理模式下 `progress` 开了也一个字没有），
+        /// 所以下载的百分比是自己算的 —— 拿本地文件当前多大除以远端说它多大。
+        var fraction: Double? {
+            guard let totalBytes, totalBytes > 0, let bytesDone else { return nil }
+            return min(1, Double(bytesDone) / Double(totalBytes))
+        }
+    }
+
+    /// 同时最多传几个。sftp 一个进程一个文件，开太多只是把带宽切碎，还会撞上服务端的
+    /// `MaxSessions`（默认 10，多路复用下每个传输占一条 channel）。
+    private static let maximumConcurrentTransfers = 2
+
+    // MARK: - 对外状态
+
+    /// 树根，也就是面板当前「打开」的目录。
+    @Published private(set) var rootPath = RemotePath.root
+    /// 每个已经列过的目录 → 它的内容。没列过的目录不在表里。
+    @Published private(set) var children: [String: [RemoteFileEntry]] = [:]
+    /// 展开着的目录（含树根）。
+    @Published private(set) var expanded: Set<String> = [RemotePath.root]
+    /// 正在列的目录 —— 那一行显示转圈。
+    @Published private(set) var loading: Set<String> = []
+    /// 列失败的目录 → 原因（没权限、被删了）。
+    @Published private(set) var errors: [String: String] = [:]
+    /// 选中的那一项，也是上传的落点。nil = 没选，落点就是树根。
+    @Published var selection: String?
+    /// 远端家目录，由 sftp 刚连上时的 `pwd` 得到。也用来把标题里的 `~` 展开成真路径。
+    @Published private(set) var home: String?
+    @Published private(set) var transfers: [Transfer] = []
+
+    /// 连接层面的问题（会话没连上、sftp 起不来），整块面板级的提示。
+    @Published private(set) var connectionError: String?
+
+    @Published var showsHidden: Bool {
+        didSet { UserDefaults.standard.set(showsHidden, forKey: Self.showsHiddenKey) }
+    }
+
+    /// 跟着终端的当前目录跑。关掉之后面板就停在用户自己点到的地方。
+    @Published var followsTerminal: Bool {
+        didSet { UserDefaults.standard.set(followsTerminal, forKey: Self.followsTerminalKey) }
+    }
+
+    private static let showsHiddenKey = "fileBrowserShowsHidden"
+    private static let followsTerminalKey = "fileBrowserFollowsTerminal"
+
+    // MARK: - 内部
+
+    private weak var session: SSHSession?
+    private let host: HostConfig
+    /// 正在跑的列目录调用。**同一时刻只有一个** —— 新的一来就把旧的掐掉，
+    /// 因为用户点得快时晚回来的旧结果不该盖住新的。`loading` 也就跟着它整批换。
+    private var listingRunner: SFTPRunner?
+    /// 传输 id → 它的进程，用于取消。
+    private var transferRunners: [UUID: SFTPRunner] = [:]
+    /// 传输 id → 落地文件路径，用于轮询下载进度。
+    private var transferTargets: [UUID: URL] = [:]
+    /// 传输 id → 还没起的命令（以及传完要重列哪个目录）。
+    private var pendingCommands: [UUID: (command: String, reload: String?)] = [:]
+    private var progressTimer: Timer?
+    /// 已经问过家目录了（问一次就够，不用每次展开都带上 `pwd`）。
+    private var hasResolvedHome = false
+
+    init(host: HostConfig) {
+        self.host = host
+        let defaults = UserDefaults.standard
+        self.showsHidden = defaults.bool(forKey: Self.showsHiddenKey)
+        // 没存过时默认**跟随**：绝大多数时候「我现在在哪」就是想看的地方。
+        self.followsTerminal = defaults.object(forKey: Self.followsTerminalKey) as? Bool ?? true
+    }
+
+    deinit {
+        progressTimer?.invalidate()
+        listingRunner?.cancel()
+        transferRunners.values.forEach { $0.cancel() }
+    }
+
+    // MARK: - 绑定会话
+
+    /// 把面板接到当前聚焦的那个分栏上。切分栏、重连之后都要重新调。
+    ///
+    /// 只换发命令用的连接，**不动**已经展开的树 —— 同一个 tab 的几个分栏是同一台主机，
+    /// 路径通用，没必要因为切了个分栏就把树收回去。
+    func bind(session: SSHSession?) {
+        guard self.session !== session else { return }
+        self.session = session
+        connectionError = nil
+    }
+
+    /// 面板露出来时调。第一次会顺手问出家目录并定位到终端当前目录。
+    ///
+    /// 会话还没连上时**不发命令**，但要把原因写进 `connectionError` ——
+    /// 否则面板只会空着，看不出是「还在连」还是「这个目录真是空的」。
+    func activate() {
+        guard let session else {
+            connectionError = "没有打开的连接"
+            return
+        }
+        guard session.isMultiplexReady else {
+            connectionError = session.state.isLive ? "正在连接…" : "会话未连接，按 ⌘R 重连"
+            return
+        }
+        connectionError = nil
+
+        if !hasResolvedHome {
+            resolveHomeAndLocate()
+        } else if children[rootPath] == nil {
+            load(rootPath)
+        }
+    }
+
+    // MARK: - 定位
+
+    /// 「定位到当前目录」。探不到就退回家目录，两个都没有就待在原地。
+    func locate() {
+        guard let session else { return }
+        guard let directory = session.remoteDirectory(home: home) ?? home else { return }
+        navigate(to: directory)
+    }
+
+    /// 终端的目录变了。只有开着「跟随」时才动，而且已经在那儿就别重列一次。
+    func terminalDirectoryChanged() {
+        guard followsTerminal,
+              let session,
+              session.isMultiplexReady,
+              let directory = session.remoteDirectory(home: home),
+              directory != rootPath
+        else { return }
+        navigate(to: directory)
+    }
+
+    /// 换树根（面包屑、定位、双击进目录都走这里）。
+    func navigate(to path: String) {
+        let path = RemotePath.normalize(path)
+        rootPath = path
+        expanded.insert(path)
+        // 换根之后原来的选中项可能已经不在视野里了，清掉免得上传落点莫名指到别处。
+        if let selection, !RemotePath.isDescendant(selection, of: path) {
+            self.selection = nil
+        }
+        load(path)
+    }
+
+    /// 面包屑：从根到当前目录的每一级。
+    var breadcrumb: [String] {
+        RemotePath.ancestors(of: rootPath)
+    }
+
+    // MARK: - 展开与列目录
+
+    func toggle(_ path: String) {
+        if expanded.contains(path) {
+            expanded.remove(path)
+        } else {
+            expanded.insert(path)
+            // 只在没列过时才发命令；想强制刷新走 `refresh()`。
+            if children[path] == nil { load(path) }
+        }
+    }
+
+    func isExpanded(_ path: String) -> Bool { expanded.contains(path) }
+
+    /// 重列当前树根以及所有展开着的子目录 —— 远端刚被改动过时用。
+    func refresh() {
+        let targets = ([rootPath] + expanded.filter { RemotePath.isDescendant($0, of: rootPath) })
+            .reduced()
+        guard !targets.isEmpty else { return }
+        errors.removeAll()
+        run(listing: targets)
+    }
+
+    /// 列一个目录。
+    func load(_ path: String) {
+        run(listing: [path])
+    }
+
+    /// 第一次进来：`pwd` 问家目录 + 列一个目录，**一次往返**办完。
+    private func resolveHomeAndLocate() {
+        guard let plan = makePlan() else { return }
+        // 先立起来，免得面板刚露出来那几帧里重复发一遍；真失败了在回调里放回去，好让用户能重试。
+        hasResolvedHome = true
+
+        // 家目录还不知道，所以此刻只能用绝对路径那条线索；`~/x` 那种要等 pwd 回来才展开得开。
+        let initialPath = session?.remoteDirectory(home: nil) ?? RemotePath.root
+        let commands = [SFTPCommandBuilder.pwd, SFTPCommandBuilder.list(directory: initialPath)]
+
+        listingRunner?.cancel()
+        loading = [initialPath]
+        let runner = SFTPRunner()
+        listingRunner = runner
+        runner.start(plan: plan, commands: commands) { [weak self] outcome in
+            guard let self, self.listingRunner === runner else { return }
+            self.listingRunner = nil
+            self.loading = []
+
+            if let output = outcome.outputs.first ?? nil {
+                self.home = SFTPCommandBuilder.parsePwd(output)
+            }
+            guard outcome.isSuccess else {
+                self.hasResolvedHome = false
+                self.connectionError = self.explain(outcome)
+                return
+            }
+            self.connectionError = nil
+
+            // 现在知道家目录了，`~/logs` 这类线索才展开得开 —— 重新算一次落点。
+            let target = self.session?.remoteDirectory(home: self.home) ?? self.home ?? initialPath
+            if target == initialPath, let output = outcome.outputs.last ?? nil {
+                self.rootPath = initialPath
+                self.expanded.insert(initialPath)
+                self.children[initialPath] = SFTPListingParser.parse(output, directory: initialPath)
+            } else {
+                self.navigate(to: target)
+            }
+        }
+    }
+
+    private func run(listing paths: [String]) {
+        guard let plan = makePlan() else { return }
+
+        listingRunner?.cancel()
+        // 整批换掉：只有一个列目录调用在跑，被顶掉的那批不该继续显示转圈。
+        loading = Set(paths)
+        let commands = paths.map { SFTPCommandBuilder.list(directory: $0) }
+
+        let runner = SFTPRunner()
+        listingRunner = runner
+        runner.start(plan: plan, commands: commands) { [weak self] outcome in
+            guard let self, self.listingRunner === runner else { return }
+            self.listingRunner = nil
+            self.loading = []
+
+            /// 第一条没拿到输出的：批处理一错即退，所以它就是出错的那一级
+            /// （再往后的都是被连带取消的，不该也标成错）。
+            var failedIndex: Int?
+            for (index, path) in paths.enumerated() {
+                guard let output = outcome.outputs[index] else {
+                    failedIndex = failedIndex ?? index
+                    continue
+                }
+                self.children[path] = SFTPListingParser.parse(output, directory: path)
+                self.errors.removeValue(forKey: path)
+            }
+
+            guard !outcome.isSuccess else {
+                self.connectionError = nil
+                return
+            }
+            let message = self.explain(outcome)
+            if let failedIndex {
+                self.errors[paths[failedIndex]] = message
+            } else {
+                // 每条都有输出却仍然失败：不是某个目录的问题，按连接层的问题报。
+                self.connectionError = message
+            }
+        }
+    }
+
+    // MARK: - 传输
+
+    /// 上传若干本地文件 / 目录到 `directory`。
+    func upload(_ localURLs: [URL], to directory: String) {
+        for url in localURLs {
+            let isDirectory = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
+            let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).flatMap { UInt64($0) }
+            let remote = RemotePath.join(directory, url.lastPathComponent)
+
+            enqueue(
+                Transfer(
+                    name: url.lastPathComponent,
+                    direction: .upload,
+                    totalBytes: isDirectory ? nil : size
+                ),
+                command: SFTPCommandBuilder.put(local: url.path, remote: remote, recursive: isDirectory),
+                target: nil,
+                // 上传完目标目录的内容变了，列一遍才对得上。
+                reloadOnFinish: directory
+            )
+        }
+    }
+
+    /// 下载一项到本地 `destination`（已经含文件名）。
+    func download(_ entry: RemoteFileEntry, to destination: URL) {
+        let isDirectory = entry.kind == .directory
+        enqueue(
+            Transfer(
+                name: entry.name,
+                direction: .download,
+                totalBytes: isDirectory ? nil : entry.size
+            ),
+            command: SFTPCommandBuilder.get(
+                remote: entry.path,
+                local: destination.path,
+                recursive: isDirectory
+            ),
+            target: isDirectory ? nil : destination,
+            reloadOnFinish: nil
+        )
+    }
+
+    func cancel(_ transferID: UUID) {
+        transferRunners[transferID]?.cancel()
+        // 还在排队（进程都没起）时，直接就地标成失败，顺手把攒着的命令扔掉。
+        if let index = transfers.firstIndex(where: { $0.id == transferID }), transfers[index].state == .queued {
+            pendingCommands.removeValue(forKey: transferID)
+            transferTargets.removeValue(forKey: transferID)
+            transfers[index].state = .failed("已取消")
+            startQueuedTransfers()
+        }
+    }
+
+    /// 清掉已经结束的记录（完成的和失败的）。
+    func clearFinishedTransfers() {
+        transfers.removeAll { $0.isDone }
+    }
+
+    var hasFinishedTransfers: Bool {
+        transfers.contains { $0.isDone }
+    }
+
+    private func enqueue(_ transfer: Transfer, command: String, target: URL?, reloadOnFinish: String?) {
+        transfers.append(transfer)
+        if let target { transferTargets[transfer.id] = target }
+        pendingCommands[transfer.id] = (command, reloadOnFinish)
+        startQueuedTransfers()
+    }
+
+    private func startQueuedTransfers() {
+        for index in transfers.indices where transfers[index].state == .queued {
+            guard transfers.filter({ $0.state == .running }).count < Self.maximumConcurrentTransfers else { return }
+            let id = transfers[index].id
+            guard let pending = pendingCommands.removeValue(forKey: id) else {
+                transfers[index].state = .failed("内部错误：命令丢失")
+                continue
+            }
+            guard let plan = makePlan() else {
+                transfers[index].state = .failed(connectionError ?? "会话未连接")
+                continue
+            }
+
+            transfers[index].state = .running
+            let runner = SFTPRunner()
+            transferRunners[id] = runner
+            // 传输**不设超时**：大文件传十几分钟也正常，掐掉才是错的。要停就用「取消」。
+            runner.start(plan: plan, commands: [pending.command], timeout: nil) { [weak self] outcome in
+                self?.finish(transferID: id, outcome: outcome, reload: pending.reload)
+            }
+            updateProgressTimer()
+        }
+    }
+
+    private func finish(transferID: UUID, outcome: SFTPRunner.Outcome, reload: String?) {
+        transferRunners.removeValue(forKey: transferID)
+        transferTargets.removeValue(forKey: transferID)
+
+        if let index = transfers.firstIndex(where: { $0.id == transferID }) {
+            if outcome.isSuccess {
+                transfers[index].state = .finished
+                // 传完了就把进度条填满：最后一段轮询不一定赶得上。
+                transfers[index].bytesDone = transfers[index].totalBytes
+            } else {
+                transfers[index].state = .failed(explain(outcome))
+            }
+        }
+
+        if outcome.isSuccess, let reload, children[reload] != nil {
+            load(reload)
+        }
+        updateProgressTimer()
+        startQueuedTransfers()
+    }
+
+    // MARK: - 下载进度
+
+    /// 只在有下载跑着的时候开表。上传测不了进度，光有上传就不用轮询。
+    private func updateProgressTimer() {
+        let needsPolling = transfers.contains { transfer in
+            transfer.state == .running
+                && transfer.direction == .download
+                && transferTargets[transfer.id] != nil
+        }
+
+        if needsPolling, progressTimer == nil {
+            progressTimer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { [weak self] _ in
+                self?.pollProgress()
+            }
+        } else if !needsPolling {
+            progressTimer?.invalidate()
+            progressTimer = nil
+        }
+    }
+
+    private func pollProgress() {
+        for index in transfers.indices where transfers[index].state == .running {
+            guard let url = transferTargets[transfers[index].id],
+                  let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize
+            else { continue }
+            transfers[index].bytesDone = UInt64(size)
+        }
+    }
+
+    // MARK: - 辅助
+
+    /// 把一次失败翻译成给人看的话。
+    ///
+    /// 会话已经断了的话**别报 sftp 的原文** —— 那时 sftp 说的是「Connection closed」
+    /// （master socket 没了，它退回直连又没有可用的认证方式），对着这句话没人知道该干什么。
+    /// 真正该说的是「会话断了，按 ⌘R 重连」。
+    private func explain(_ outcome: SFTPRunner.Outcome) -> String {
+        if let session, !session.isMultiplexReady {
+            return session.state.isLive ? "正在连接…" : "会话未连接，按 ⌘R 重连"
+        }
+        return outcome.errorMessage ?? "操作失败"
+    }
+
+    /// 当前能不能发 sftp。不能就把原因记下来给面板显示。
+    private func makePlan() -> SSHLaunchPlan? {
+        guard let session else {
+            connectionError = "没有打开的连接"
+            return nil
+        }
+        guard session.isMultiplexReady else {
+            connectionError = session.state.isLive ? "正在连接…" : "会话未连接，按 ⌘R 重连"
+            return nil
+        }
+        return SFTPCommandBuilder.makePlan(config: host, controlPath: session.controlPath)
+    }
+
+    /// 某个目录当前该显示的内容（隐藏文件按开关过滤）。
+    func visibleChildren(of path: String) -> [RemoteFileEntry] {
+        let entries = children[path] ?? []
+        return showsHidden ? entries : entries.filter { !$0.isHidden }
+    }
+
+    /// 上传落点：选中的是目录就是它，选中的是文件就是它所在的目录，什么都没选就是树根。
+    func uploadDestination() -> String {
+        guard let selection else { return rootPath }
+        if let entry = entry(at: selection) {
+            return entry.kind == .directory ? selection : RemotePath.parent(of: selection)
+        }
+        return rootPath
+    }
+
+    func entry(at path: String) -> RemoteFileEntry? {
+        children[RemotePath.parent(of: path)]?.first { $0.path == path }
+    }
+}
+
+private extension Array where Element == String {
+
+    /// 去重且保持顺序 —— 刷新时树根可能同时出现在「展开列表」里。
+    func reduced() -> [String] {
+        var seen = Set<String>()
+        return filter { seen.insert($0).inserted }
+    }
+}

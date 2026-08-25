@@ -1,28 +1,34 @@
 import SwiftUI
 
-/// 左侧竖栏上的功能。目前只有「主机」一项 —— 以后加端口转发、SFTP 之类的，
-/// 在这里补一个 case（外加 `HostSidebarView` 那样的面板视图）就行，竖栏本身不用改。
+/// 左侧竖栏上的功能。以后加端口转发之类的，在这里补一个 case
+/// （外加 `HostSidebarView` 那样的面板视图）就行，竖栏本身不用改。
+///
+/// `rawValue` 会写进 UserDefaults（记住上次展开的是哪个），所以**不要改已有的字符串**。
 enum SidebarPanel: String, CaseIterable, Identifiable {
 
     case hosts
+    case files
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
         case .hosts: return "主机"
+        case .files: return "文件"
         }
     }
 
     var icon: String {
         switch self {
         case .hosts: return "server.rack"
+        case .files: return "folder"
         }
     }
 
     var help: String {
         switch self {
         case .hosts: return "管理主机（⌘B 开关）"
+        case .files: return "浏览当前主机的文件（⇧⌘B 开关）"
         }
     }
 }

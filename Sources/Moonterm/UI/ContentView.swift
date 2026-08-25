@@ -41,6 +41,8 @@ struct ContentView: View {
                 switch panel {
                 case .hosts:
                     HostSidebarView()
+                case .files:
+                    FileSidebarView()
                 }
             }
             .frame(width: appState.sidebarWidth)
