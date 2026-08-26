@@ -407,6 +407,38 @@ final class PaneLayoutTests: XCTestCase {
         XCTAssertEqual(PaneDropZone.resolve(point: .zero, in: .zero), .center)
     }
 
+    func testMovePreviewUsesCenterForOnlyWindowDraggedOntoItself() {
+        let sessionID = UUID()
+        let zone = PaneDropZone.edge(.leading).previewingMove(
+            movingSessionID: sessionID,
+            targetSessionID: sessionID,
+            targetPaneSessionCount: 1
+        )
+
+        XCTAssertEqual(zone, .center)
+    }
+
+    func testMovePreviewKeepsEdgeWhenSelfSplitCanChangeLayout() {
+        let sessionID = UUID()
+        let zone = PaneDropZone.edge(.bottom).previewingMove(
+            movingSessionID: sessionID,
+            targetSessionID: sessionID,
+            targetPaneSessionCount: 2
+        )
+
+        XCTAssertEqual(zone, .edge(.bottom))
+    }
+
+    func testMovePreviewKeepsEdgeForAnotherTargetPane() {
+        let zone = PaneDropZone.edge(.trailing).previewingMove(
+            movingSessionID: UUID(),
+            targetSessionID: UUID(),
+            targetPaneSessionCount: 1
+        )
+
+        XCTAssertEqual(zone, .edge(.trailing))
+    }
+
     // MARK: - 方位
 
     func testEdgeAxisAndOrder() {

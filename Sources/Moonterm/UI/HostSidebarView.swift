@@ -25,6 +25,8 @@ struct HostSidebarView: View {
     @State private var groupBeingRenamed: UUID?
     /// 鼠标在标题栏那个 `+` 上。`Menu` 自己不给悬停状态，只能自己接。
     @State private var isPlusHovering = false
+    /// 每点一次主机行就递增；AppKit 接收层据此拿回焦点，让删除键作用于当前主机选区。
+    @State private var keyboardFocusRequest = 0
 
     private var store: ConfigStore { appState.configStore }
 
@@ -41,6 +43,12 @@ struct HostSidebarView: View {
         }
         .frame(maxHeight: .infinity)
         .background(ChromeStyle.sidebar)
+        .background(
+            HostPanelKeyboardCatcher(focusRequest: keyboardFocusRequest) {
+                requestSelectionDeletion()
+            }
+            .frame(width: 0, height: 0)
+        )
         .alert(
             deletionTitle,
             isPresented: Binding(
@@ -54,8 +62,6 @@ struct HostSidebarView: View {
                 selection.remove(targets.map { $0.id })
             }
             Button("取消", role: .cancel) {}
-        } message: { _ in
-            Text("配置和保存的密码都会被删除，此操作不可撤销。已经连上的窗口不受影响。")
         }
         .alert(
             "删除分组「\(groupPendingDeletion?.displayName ?? "")」？",
@@ -226,6 +232,7 @@ struct HostSidebarView: View {
                 isIndented: host.groupID != nil,
                 isBeingDragged: drag.isDraggingHost(host.id),
                 onClick: { clickCount, modifiers in
+                    keyboardFocusRequest &+= 1
                     if clickCount > 1 {
                         connect([host])
                     } else {
@@ -322,6 +329,19 @@ struct HostSidebarView: View {
         groupBeingRenamed = group.id
     }
 
+    private func requestSelectionDeletion() {
+        guard hostsPendingDeletion.isEmpty,
+              groupPendingDeletion == nil,
+              groupBeingRenamed == nil
+        else { return }
+
+        let targets = store.displayOrderedHostIDs
+            .filter { selection.contains($0) }
+            .compactMap { store.host(id: $0) }
+        guard !targets.isEmpty else { return }
+        hostsPendingDeletion = targets
+    }
+
     @ViewBuilder
     private func menu(for host: HostConfig) -> some View {
         let targets = menuTargets(for: host)
@@ -393,6 +413,53 @@ struct HostSidebarView: View {
     private func menuTargets(for host: HostConfig) -> [HostConfig] {
         let ids = selection.targets(rightClicking: host.id, in: visibleHostIDs)
         return ids.compactMap { id in store.host(id: id) }
+    }
+}
+
+// MARK: - 主机面板键盘焦点
+
+/// 主机行的点击由 AppKit 命中层接收，不会自动成为键盘第一响应者。这个零尺寸视图在选中主机后
+/// 接住 Backspace / Delete，并把删除交给面板现有的批量确认流程；点回终端后焦点会自然还给终端。
+private struct HostPanelKeyboardCatcher: NSViewRepresentable {
+
+    let focusRequest: Int
+    let onDelete: () -> Void
+
+    func makeNSView(context: Context) -> KeyView {
+        let view = KeyView()
+        view.lastFocusRequest = focusRequest
+        view.onDelete = onDelete
+        return view
+    }
+
+    func updateNSView(_ nsView: KeyView, context: Context) {
+        nsView.onDelete = onDelete
+        guard nsView.lastFocusRequest != focusRequest else { return }
+        nsView.lastFocusRequest = focusRequest
+
+        // mouseDown 回调发生时视图层级可能还在更新，下一轮 runloop 再拿焦点更稳定。
+        DispatchQueue.main.async { [weak nsView] in
+            guard let nsView, let window = nsView.window else { return }
+            window.makeFirstResponder(nsView)
+        }
+    }
+
+    final class KeyView: NSView {
+
+        var lastFocusRequest = 0
+        var onDelete: (() -> Void)?
+
+        override var acceptsFirstResponder: Bool { true }
+
+        override func keyDown(with event: NSEvent) {
+            // 51 是 Backspace，117 是 Forward Delete；Fn+Backspace 到这里时也会成为 117。
+            let disallowedModifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
+            guard disallowedModifiers.isEmpty, event.keyCode == 51 || event.keyCode == 117 else {
+                super.keyDown(with: event)
+                return
+            }
+            onDelete?()
+        }
     }
 }
 

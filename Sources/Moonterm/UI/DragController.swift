@@ -46,6 +46,8 @@ final class DragController: ObservableObject {
         let anchor: UUID
         let rect: CGRect
         let chips: [Chip]
+        /// 不依赖标签几何回填的窗口数；拖拽刚起手时也能准确识别只有一个窗口的分栏。
+        let sessionCount: Int
     }
 
     struct State: Equatable {
@@ -115,7 +117,7 @@ final class DragController: ObservableObject {
             guard tabBarFrame.contains(point) else { return .none }
             return .tabBar(insertIndex: insertIndex(at: point))
 
-        case .pane:
+        case .pane(let movingSessionID):
             // 分栏窗口只能在自己 tab 的分栏区里重新布局 —— 落到 tab 条上一律无效。
             // （`paneFrames` / `paneHeaders` 只有当前可见 tab 会上报，所以天然跨不了 tab。）
             guard !tabBarFrame.contains(point) else { return .none }
@@ -126,7 +128,13 @@ final class DragController: ObservableObject {
             }
 
             guard let hit = paneFrames.first(where: { $0.value.contains(point) }) else { return .none }
-            return .pane(sessionID: hit.key, zone: PaneDropZone.resolve(point: point, in: hit.value))
+            let targetPaneSessionCount = paneHeaders.first(where: { $0.anchor == hit.key })?.sessionCount ?? 0
+            let zone = PaneDropZone.resolve(point: point, in: hit.value).previewingMove(
+                movingSessionID: movingSessionID,
+                targetSessionID: hit.key,
+                targetPaneSessionCount: targetPaneSessionCount
+            )
+            return .pane(sessionID: hit.key, zone: zone)
         }
     }
 

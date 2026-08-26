@@ -109,8 +109,8 @@ private struct DropHighlight: Equatable {
 
 /// 落点框本身。
 ///
-/// 实线框和虚线框**同时存在**，靠透明度互相叠化：`StrokeStyle` 的虚线段没法插值，
-/// 换成两个视图交替显示又会把框的身份也换掉（矩形就不再是移过去的了）。
+/// 全框与半框共用同一条实线边框，只靠填充浓淡区分「并入」和「拆分」；这样框移动时仍是
+/// 同一个视图，矩形插值动画不会因样式切换而被拆掉重建。
 private struct DropHighlightShape: View {
 
     let kind: DropHighlight.Kind
@@ -128,13 +128,8 @@ private struct DropHighlightShape: View {
             .fill(fill)
             .overlay(
                 shape
-                    .strokeBorder(border, style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
-                    .opacity(kind == .merge ? 1 : 0)
-            )
-            .overlay(
-                shape
                     .strokeBorder(border, lineWidth: 2)
-                    .opacity(kind == .split ? 1 : 0)
+                    .opacity(kind == .insertLine ? 0 : 1)
             )
     }
 

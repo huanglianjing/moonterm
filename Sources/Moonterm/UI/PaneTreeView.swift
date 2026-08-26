@@ -261,7 +261,12 @@ private struct PaneHeaderBar: View {
         }
         .reportFrame(PaneHeadersKey.self) { rect in
             isActive
-                ? [DragController.PaneHeader(anchor: group.activeID, rect: rect, chips: chips)]
+                ? [DragController.PaneHeader(
+                    anchor: group.activeID,
+                    rect: rect,
+                    chips: chips,
+                    sessionCount: group.sessionIDs.count
+                )]
                 : []
         }
     }

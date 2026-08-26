@@ -72,6 +72,20 @@ public enum PaneDropZone: Equatable, Sendable {
         ]
         return candidates.min { $0.1 < $1.1 }?.0 ?? .trailing
     }
+
+    /// 根据实际可执行的窗口移动修正预览。拖动目标分栏里唯一的窗口到自身边缘时，没有另一个
+    /// 窗口可作为拆分锚点，松手后布局不会变化；此时用中心全框表达「仍留在原分栏」。
+    public func previewingMove(
+        movingSessionID: UUID,
+        targetSessionID: UUID,
+        targetPaneSessionCount: Int
+    ) -> PaneDropZone {
+        guard case .edge = self,
+              movingSessionID == targetSessionID,
+              targetPaneSessionCount == 1
+        else { return self }
+        return .center
+    }
 }
 
 // MARK: - 会话组

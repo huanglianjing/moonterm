@@ -1,6 +1,7 @@
 import AppKit
 import MoontermCore
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// 竖栏「文件」图标展开的面板：当前 tab 那台主机的远端文件树，能上传下载。
 ///
@@ -34,8 +35,18 @@ private struct FilePanel: View {
     @State private var isOptionsHovering = false
     /// 新建目录与重命名共用一个小输入框；nil 表示没在输入。
     @State private var nameRequest: FileNameRequest?
-    /// 删除确认和异步操作错误共用一条 alert 通道，避免同一视图上多个 alert 互相覆盖。
-    @State private var panelAlert: FilePanelAlert?
+    /// 待确认删除的条目。单独使用新版 alert builder，才能显式指定 Enter / Esc 的按钮语义。
+    @State private var deletionConfirmation: RemoteFileEntry?
+    @State private var operationError: String?
+    /// 本地文件正悬在整棵树上；没有更具体的行落点时，实际上传到当前树根。
+    @State private var isRootFileDropTargeted = false
+    /// 必须按具体行追踪：相邻普通文件会映射到同一个父目录，旧行的延迟离开事件不能清掉新行的高亮。
+    @State private var rowDropTargets = FileDropTargetTracker()
+    /// 每点一次文件行就递增；AppKit 键盘接收层据此重新拿回第一响应者，点终端后则自然把焦点让回终端。
+    @State private var fileKeyboardFocusRequest = 0
+    /// 展开时传输区的高度；收起不改它，下次展开回到用户拖出的尺寸。
+    @State private var transferHeight: CGFloat = 120
+    @State private var isTransferCollapsed = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -45,6 +56,25 @@ private struct FilePanel: View {
         }
         .frame(maxHeight: .infinity)
         .background(ChromeStyle.sidebar)
+        .background(
+            FilePanelKeyboardCatcher(focusRequest: fileKeyboardFocusRequest) {
+                requestSelectionDeletion()
+            }
+            .frame(width: 0, height: 0)
+        )
+        .background(
+            DeletionConfirmationKeyboardMonitor(
+                isActive: deletionConfirmation != nil,
+                onConfirm: {
+                    guard let entry = deletionConfirmation else { return }
+                    confirmDeletion(entry)
+                },
+                onCancel: {
+                    deletionConfirmation = nil
+                }
+            )
+            .frame(width: 0, height: 0)
+        )
         .sheet(item: $nameRequest) { request in
             FileNameEditor(
                 title: request.title,
@@ -54,25 +84,25 @@ private struct FilePanel: View {
                 perform(request, name: name)
             }
         }
-        .alert(item: $panelAlert) { item in
-            switch item.kind {
-            case .confirmDeletion(let entry):
-                return Alert(
-                    title: Text("删除「\(entry.name)」？"),
-                    primaryButton: .destructive(Text("删除")) {
-                        browser.delete(entry) { error in
-                            if let error { panelAlert = FilePanelAlert(.error(error)) }
-                        }
-                    },
-                    secondaryButton: .cancel()
-                )
-            case .error(let message):
-                return Alert(
-                    title: Text("文件操作失败"),
-                    message: Text(message),
-                    dismissButton: .default(Text("好"))
-                )
+        .alert(
+            deletionConfirmation.map { "删除「\($0.name)」？" } ?? "确认删除",
+            isPresented: deletionConfirmationIsPresented,
+            presenting: deletionConfirmation
+        ) { entry in
+            Button("取消", role: .cancel) {
+                deletionConfirmation = nil
             }
+            .keyboardShortcut(.cancelAction)
+
+            Button("删除", role: .destructive) {
+                confirmDeletion(entry)
+            }
+        }
+        .alert("文件操作失败", isPresented: operationErrorIsPresented) {
+            Button("好", role: .cancel) { operationError = nil }
+                .keyboardShortcut(.defaultAction)
+        } message: {
+            Text(operationError ?? "操作失败")
         }
     }
 
@@ -156,8 +186,12 @@ private struct FilePanel: View {
             }
 
             if !browser.transfers.isEmpty {
-                ChromeHairline()
-                TransferList(browser: browser)
+                TransferResizeHandle(
+                    height: $transferHeight,
+                    isCollapsed: $isTransferCollapsed
+                )
+                TransferList(browser: browser, isCollapsed: $isTransferCollapsed)
+                    .frame(height: isTransferCollapsed ? 20 : transferHeight)
             }
         }
         // 面板一露头就接上当前分栏、问家目录、定位过去。
@@ -197,7 +231,8 @@ private struct FilePanel: View {
 
                     BreadcrumbSegment(
                         title: RemotePath.name(of: path),
-                        isCurrent: path == browser.rootPath
+                        isCurrent: path == browser.rootPath,
+                        isDropTarget: path == browser.rootPath && highlightedDropDirectory == browser.rootPath
                     ) {
                         browser.navigate(to: path)
                     }
@@ -220,8 +255,10 @@ private struct FilePanel: View {
     private func tree(browser: RemoteFileBrowser) -> some View {
         let visibleRows = rows(of: browser.rootPath, depth: 0, browser: browser)
 
-        return ScrollView {
-            LazyVStack(spacing: 1) {
+        return GeometryReader { proxy in
+            ScrollView {
+                // 行间不能留布局缝隙：外层滚动区也是根目录的落点，拖在一像素缝里就会被误判成传到根目录。
+                LazyVStack(spacing: 0) {
                 ForEach(visibleRows, id: \.entry.path) { row in
                     FileRow(
                         entry: row.entry,
@@ -230,8 +267,10 @@ private struct FilePanel: View {
                         isExpanded: browser.isExpanded(row.entry.path),
                         isLoading: browser.loading.contains(row.entry.path),
                         error: browser.errors[row.entry.path],
+                        isDropDestination: highlightedDropDirectory == row.entry.path,
                         onClick: { clickCount in
                             browser.selection = row.entry.path
+                            fileKeyboardFocusRequest &+= 1
                             // 第一下只选中，第二下才切换。ClickCatcher 在 mouseDown 就回调，
                             // 所以若让第一下切换，鼠标还没松开目录就会自己展开或收起。
                             // 文件不管点几下都只是选中：5 GB 的文件不该因为手抖多点一下就开始传。
@@ -241,6 +280,18 @@ private struct FilePanel: View {
                         },
                         onToggle: {
                             browser.toggle(row.entry.path)
+                        },
+                        onUpload: { localURLs in
+                            browser.selection = nil
+                            rowDropTargets.clear()
+                            browser.upload(localURLs, to: uploadDestination(for: row.entry))
+                        },
+                        onDropTargetChanged: { isTargeted in
+                            updateRowDropDestination(
+                                rowPath: row.entry.path,
+                                uploadDestination(for: row.entry),
+                                isTargeted: isTargeted
+                            )
                         }
                     )
                     .contextMenu { menu(for: row.entry, browser: browser) }
@@ -264,11 +315,77 @@ private struct FilePanel: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal, 8)
                 }
+                }
+                .padding(.horizontal, 4)
+                // 先让内容至少填满可视高度，再补上下边距；后台命中层于是能覆盖最后一行下面的全部空白。
+                .frame(minHeight: max(0, proxy.size.height - 8), alignment: .top)
+                .padding(.vertical, 4)
+                .background(
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .onLeftClick { _, _ in browser.selection = nil }
+                )
             }
-            .padding(.horizontal, 4)
-            .padding(.vertical, 4)
+            .frame(width: proxy.size.width, height: proxy.size.height)
+            .fileDropDestination(isTargeted: $isRootFileDropTargeted) { localURLs in
+                browser.selection = nil
+                rowDropTargets.clear()
+                browser.upload(localURLs, to: browser.rootPath)
+            }
+            .onChange(of: isRootFileDropTargeted) { isTargeted in
+                if isTargeted { browser.selection = nil }
+            }
         }
-        .frame(maxHeight: .infinity)
+    }
+
+    /// 最具体的行落点优先于树本身。外层 `ScrollView` 也会在行上方变成可接收状态，不能让它
+    /// 抢走子目录的高亮；行离开后才退回当前树根。
+    private var highlightedDropDirectory: String? {
+        rowDropTargets.destination ?? (isRootFileDropTargeted ? browser.rootPath : nil)
+    }
+
+    private func uploadDestination(for entry: RemoteFileEntry) -> String {
+        entry.kind == .directory ? entry.path : RemotePath.parent(of: entry.path)
+    }
+
+    private func updateRowDropDestination(rowPath: String, _ directory: String, isTargeted: Bool) {
+        if isTargeted { browser.selection = nil }
+        rowDropTargets.setTarget(
+            rowPath: rowPath,
+            destination: directory,
+            isTargeted: isTargeted
+        )
+    }
+
+    private func requestSelectionDeletion() {
+        guard deletionConfirmation == nil,
+              operationError == nil,
+              !browser.isMutating,
+              let selection = browser.selection,
+              let entry = browser.entry(at: selection)
+        else { return }
+        deletionConfirmation = entry
+    }
+
+    private func confirmDeletion(_ entry: RemoteFileEntry) {
+        deletionConfirmation = nil
+        browser.delete(entry) { error in
+            if let error { operationError = error }
+        }
+    }
+
+    private var deletionConfirmationIsPresented: Binding<Bool> {
+        Binding(
+            get: { deletionConfirmation != nil },
+            set: { if !$0 { deletionConfirmation = nil } }
+        )
+    }
+
+    private var operationErrorIsPresented: Binding<Bool> {
+        Binding(
+            get: { operationError != nil },
+            set: { if !$0 { operationError = nil } }
+        )
     }
 
     private var loadingRow: some View {
@@ -349,7 +466,7 @@ private struct FilePanel: View {
         .disabled(browser.isMutating)
 
         Button("删除…", role: .destructive) {
-            panelAlert = FilePanelAlert(.confirmDeletion(entry))
+            deletionConfirmation = entry
         }
         .disabled(browser.isMutating)
 
@@ -363,7 +480,7 @@ private struct FilePanel: View {
 
     private func perform(_ request: FileNameRequest, name: String) {
         let completion: (String?) -> Void = { error in
-            if let error { panelAlert = FilePanelAlert(.error(error)) }
+            if let error { operationError = error }
         }
         switch request.action {
         case .createDirectory(let parent):
@@ -449,21 +566,6 @@ private struct FileNameRequest: Identifiable {
         case .createDirectory: return "新建"
         case .rename: return "重命名"
         }
-    }
-}
-
-private struct FilePanelAlert: Identifiable {
-
-    enum Kind {
-        case confirmDeletion(RemoteFileEntry)
-        case error(String)
-    }
-
-    let id = UUID()
-    let kind: Kind
-
-    init(_ kind: Kind) {
-        self.kind = kind
     }
 }
 
@@ -588,6 +690,8 @@ private struct BreadcrumbSegment: View {
 
     let title: String
     let isCurrent: Bool
+    /// 文件正要上传到这段代表的当前树根；只在实际落点是树根时为 true。
+    let isDropTarget: Bool
     let action: () -> Void
 
     @State private var isHovering = false
@@ -602,7 +706,7 @@ private struct BreadcrumbSegment: View {
                 .padding(.vertical, 2)
                 .background(
                     RoundedRectangle(cornerRadius: 3)
-                        .fill(isHovering ? ChromeStyle.hover : .clear)
+                        .fill(isDropTarget ? ChromeStyle.accent.opacity(0.26) : (isHovering ? ChromeStyle.hover : .clear))
                 )
                 .contentShape(Rectangle())
         }
@@ -626,10 +730,18 @@ private struct FileRow: View {
     let isExpanded: Bool
     let isLoading: Bool
     let error: String?
+    /// 这行是本次拖放真正会写入的目录。普通文件行的实际落点在它的父目录，所以它自己不会高亮。
+    let isDropDestination: Bool
     let onClick: (Int) -> Void
     let onToggle: () -> Void
+    /// 接收本地文件 URL。目录行传到自身，普通文件行传到它所在的目录。
+    let onUpload: ([URL]) -> Void
+    /// 行的 AppKit 落点状态变化。父视图据此高亮实际上传到的目录，而不是鼠标下的普通文件。
+    let onDropTargetChanged: (Bool) -> Void
 
     @State private var isHovering = false
+    /// Finder 拖进来的文件正悬在这个可上传的行上。单独留状态，不能借用普通悬停——拖拽时未必会有 mouseMoved。
+    @State private var isFileDropTargeted = false
 
     var body: some View {
         HStack(spacing: 4) {
@@ -673,10 +785,25 @@ private struct FileRow: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 4)
-                .fill(isSelected ? ChromeStyle.selectedRow : (isHovering ? ChromeStyle.hover : .clear))
+                .fill(
+                    isDropDestination
+                        ? ChromeStyle.accent.opacity(0.26)
+                        : (isSelected ? ChromeStyle.selectedRow : (isHovering ? ChromeStyle.hover : .clear))
+                )
         )
         .contentShape(Rectangle())
         .onHover { isHovering = $0 }
+        .onChange(of: isFileDropTargeted) { isTargeted in
+            onDropTargetChanged(isTargeted)
+        }
+        .onDisappear {
+            // LazyVStack 可能在拖动滚动时回收屏幕外的行；若它当时仍是落点，主动补一条离开事件。
+            if isFileDropTargeted { onDropTargetChanged(false) }
+        }
+        .fileDropDestination(
+            isTargeted: $isFileDropTargeted,
+            onDropFiles: onUpload
+        )
         .help(helpText)
     }
 
@@ -713,7 +840,243 @@ private struct FileRow: View {
     }
 }
 
+/// 给已有内容直接加落点。不能用透明 overlay：它会抢走 `ClickCatcher` 的点击命中，目录原有的
+/// 单击选中、双击展开就会失效。
+private struct FileDropDestination: ViewModifier {
+
+    @Binding var isTargeted: Bool
+    let onDropFiles: ([URL]) -> Void
+
+    func body(content: Content) -> some View {
+        content.onDrop(of: [UTType.fileURL], isTargeted: $isTargeted) { providers in
+            receiveDroppedFiles(from: providers)
+        }
+    }
+
+    /// 用 SwiftUI 的文件 URL 落点接 Finder / 其他 macOS App 的外部拖拽；接到以后仍交给
+    /// `RemoteFileBrowser.upload`，这样并发上限、取消、完成后刷新都和工具栏上传完全一致。
+    private func receiveDroppedFiles(from providers: [NSItemProvider]) -> Bool {
+        let fileProviders = providers.filter {
+            $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier)
+        }
+        guard !fileProviders.isEmpty else { return false }
+
+        // `loadObject` 的回调不保证在同一线程；保留 Finder 给出的顺序，等所有 URL 都取到后再一次入队。
+        let lock = NSLock()
+        var urls = Array<URL?>(repeating: nil, count: fileProviders.count)
+        let group = DispatchGroup()
+
+        for (index, provider) in fileProviders.enumerated() {
+            group.enter()
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                if let url, url.isFileURL {
+                    lock.lock()
+                    urls[index] = url
+                    lock.unlock()
+                }
+                group.leave()
+            }
+        }
+
+        group.notify(queue: .main) {
+            lock.lock()
+            let localURLs = urls.compactMap { $0 }
+            lock.unlock()
+            guard !localURLs.isEmpty else { return }
+            onDropFiles(localURLs)
+        }
+        return true
+    }
+}
+
+private extension View {
+
+    func fileDropDestination(
+        isTargeted: Binding<Bool>,
+        onDropFiles: @escaping ([URL]) -> Void
+    ) -> some View {
+        modifier(FileDropDestination(isTargeted: isTargeted, onDropFiles: onDropFiles))
+    }
+}
+
+// MARK: - 文件面板键盘焦点
+
+/// 文件行用 AppKit 接点击，本身不会像 `TextField` 那样自动成为第一响应者。这个零尺寸视图只在
+/// 用户点选文件行后主动拿一次焦点，于是 Delete / Backspace 能删远端条目；点回终端时终端照常
+/// 成为第一响应者，删除键不会误删仍留着选中色的远端文件。
+private struct FilePanelKeyboardCatcher: NSViewRepresentable {
+
+    let focusRequest: Int
+    let onDelete: () -> Void
+
+    func makeNSView(context: Context) -> KeyView {
+        let view = KeyView()
+        view.lastFocusRequest = focusRequest
+        view.onDelete = onDelete
+        return view
+    }
+
+    func updateNSView(_ nsView: KeyView, context: Context) {
+        nsView.onDelete = onDelete
+        guard nsView.lastFocusRequest != focusRequest else { return }
+        nsView.lastFocusRequest = focusRequest
+
+        // SwiftUI 更新时视图可能还没挂进 window，下一轮 runloop 再拿焦点才稳定。
+        DispatchQueue.main.async { [weak nsView] in
+            guard let nsView, let window = nsView.window else { return }
+            window.makeFirstResponder(nsView)
+        }
+    }
+
+    final class KeyView: NSView {
+
+        var lastFocusRequest = 0
+        var onDelete: (() -> Void)?
+
+        override var acceptsFirstResponder: Bool { true }
+
+        override func keyDown(with event: NSEvent) {
+            // 51 是键盘上的 Delete（向后删），117 是 Forward Delete。Fn+Delete 会带 `.function`，
+            // 只排除会改变命令语义的四种常规修饰键。
+            let disallowedModifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
+            guard disallowedModifiers.isEmpty, event.keyCode == 51 || event.keyCode == 117 else {
+                super.keyDown(with: event)
+                return
+            }
+            onDelete?()
+        }
+    }
+}
+
+// MARK: - 删除确认快捷键
+
+/// 给删除确认框保留 Return / Enter 和 Esc，但不把破坏性按钮标成系统默认按钮；后者会让按钮
+/// 在弹框刚出现时显示成蓝色，只有按下后才短暂露出破坏性操作应有的红色。
+private struct DeletionConfirmationKeyboardMonitor: NSViewRepresentable {
+
+    let isActive: Bool
+    let onConfirm: () -> Void
+    let onCancel: () -> Void
+
+    func makeNSView(context: Context) -> MonitorView {
+        let view = MonitorView()
+        update(view)
+        return view
+    }
+
+    func updateNSView(_ nsView: MonitorView, context: Context) {
+        update(nsView)
+    }
+
+    private func update(_ view: MonitorView) {
+        view.isActive = isActive
+        view.onConfirm = onConfirm
+        view.onCancel = onCancel
+    }
+
+    final class MonitorView: NSView {
+
+        var isActive = false
+        var onConfirm: (() -> Void)?
+        var onCancel: (() -> Void)?
+
+        private var monitor: Any?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if window == nil {
+                stopMonitoring()
+            } else {
+                startMonitoring()
+            }
+        }
+
+        private func startMonitoring() {
+            guard monitor == nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                guard let self, self.isActive else { return event }
+
+                let disallowedModifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
+                guard disallowedModifiers.isEmpty else { return event }
+
+                switch event.keyCode {
+                case 36, 76: // Return、数字键盘 Enter
+                    self.isActive = false
+                    self.onConfirm?()
+                    return nil
+                case 53: // Esc
+                    self.isActive = false
+                    self.onCancel?()
+                    return nil
+                default:
+                    return event
+                }
+            }
+        }
+
+        private func stopMonitoring() {
+            guard let monitor else { return }
+            NSEvent.removeMonitor(monitor)
+            self.monitor = nil
+        }
+
+        deinit {
+            stopMonitoring()
+        }
+    }
+}
+
 // MARK: - 传输区
+
+/// 传输区上边缘：向上拖会变高，向下拖会变矮。用全局位移是因为边缘自己会随高度移动，
+/// 若拿局部坐标累计，手柄会一边移动一边改变下一帧的输入。
+private struct TransferResizeHandle: View {
+
+    @Binding var height: CGFloat
+    @Binding var isCollapsed: Bool
+
+    @State private var baseHeight: CGFloat?
+    @State private var isHovering = false
+
+    private static let minimumHeight: CGFloat = 64
+    private static let maximumHeight: CGFloat = 300
+
+    var body: some View {
+        Rectangle()
+            .fill(isHovering ? ChromeStyle.dividerHovered : ChromeStyle.divider)
+            .frame(height: 4)
+            .frame(maxWidth: .infinity)
+            .contentShape(Rectangle())
+            .onHover { hovering in
+                isHovering = hovering
+                if hovering {
+                    NSCursor.resizeUpDown.push()
+                } else {
+                    NSCursor.pop()
+                }
+            }
+            // 点「清除」可能让整块传输区在鼠标还压着手柄时消失，游标栈也要成对收回。
+            .onDisappear {
+                if isHovering {
+                    NSCursor.pop()
+                    isHovering = false
+                }
+            }
+            .gesture(
+                DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                    .onChanged { value in
+                        if isCollapsed { isCollapsed = false }
+                        let start = baseHeight ?? height
+                        baseHeight = start
+                        height = min(
+                            max(start - value.translation.height, Self.minimumHeight),
+                            Self.maximumHeight
+                        )
+                    }
+                    .onEnded { _ in baseHeight = nil }
+            )
+    }
+}
 
 /// 面板底部那一小块：正在传和刚传完的条目。
 ///
@@ -722,13 +1085,25 @@ private struct FileRow: View {
 private struct TransferList: View {
 
     @ObservedObject var browser: RemoteFileBrowser
+    @Binding var isCollapsed: Bool
 
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 4) {
-                Text("传输")
-                    .font(.system(size: 10, weight: .semibold))
+                Button {
+                    isCollapsed.toggle()
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
+                            .font(.system(size: 7, weight: .bold))
+                        Text("传输")
+                            .font(.system(size: 10, weight: .semibold))
+                    }
                     .foregroundStyle(.secondary)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(isCollapsed ? "展开传输区" : "收起传输区")
 
                 Spacer(minLength: 0)
 
@@ -742,17 +1117,17 @@ private struct TransferList: View {
             .padding(.horizontal, 8)
             .frame(height: 20)
 
-            ScrollView {
-                VStack(spacing: 2) {
-                    ForEach(browser.transfers) { transfer in
-                        TransferRow(transfer: transfer) { browser.cancel(transfer.id) }
+            if !isCollapsed {
+                ScrollView {
+                    VStack(spacing: 2) {
+                        ForEach(browser.transfers) { transfer in
+                            TransferRow(transfer: transfer) { browser.cancel(transfer.id) }
+                        }
                     }
+                    .padding(.horizontal, 6)
+                    .padding(.bottom, 6)
                 }
-                .padding(.horizontal, 6)
-                .padding(.bottom, 6)
             }
-            // 传输区不能把树挤没了：只占一小条，多了自己滚。
-            .frame(maxHeight: 120)
         }
         .background(ChromeStyle.paneHeader)
     }
