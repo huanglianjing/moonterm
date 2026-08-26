@@ -377,8 +377,43 @@ public struct PaneNode: Identifiable, Equatable {
               contains(sessionID: target)
         else { return false }
 
+        // 已经是目标旁边的独立分栏时，视觉结果不会变化。若仍然先删再插，虽然最终树形一样，
+        // 叶子节点的 id 却会全部换掉；SwiftUI 会据此拆装长期持有的终端 NSView，留下空的灰色容器。
+        guard !isAlreadyPositioned(sessionID: moving, relativeTo: target, edge: edge) else { return false }
+
         guard remove(sessionID: moving) else { return false }
         return insert(sessionID: moving, relativeTo: target, edge: edge)
+    }
+
+    /// `moving` 是否已经作为独立叶子紧挨着目标，且方向与当前 split 一致。
+    ///
+    /// 移动的是多窗口分栏里的一个会话时不能判成原位：那次拖动的意图正是把它从组里拆成新分栏。
+    private func isAlreadyPositioned(sessionID moving: UUID, relativeTo target: UUID, edge: PaneEdge) -> Bool {
+        guard group(containing: moving)?.count == 1 else { return false }
+
+        switch content {
+        case .group:
+            return false
+
+        case .split(let axis, let children):
+            if axis == edge.axis,
+               let movingIndex = children.firstIndex(where: {
+                   $0.node.isLeaf && $0.node.contains(sessionID: moving)
+               }),
+               let targetIndex = children.firstIndex(where: {
+                   $0.node.isLeaf && $0.node.contains(sessionID: target)
+               }) {
+                return edge.insertsBefore
+                    ? movingIndex + 1 == targetIndex
+                    : movingIndex == targetIndex + 1
+            }
+
+            // 两个会话同在一棵更深的子树里时，原位关系由那一层判断。
+            guard let child = children.first(where: {
+                $0.node.contains(sessionID: moving) && $0.node.contains(sessionID: target)
+            }) else { return false }
+            return child.node.isAlreadyPositioned(sessionID: moving, relativeTo: target, edge: edge)
+        }
     }
 
     // MARK: - 占比

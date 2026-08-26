@@ -76,6 +76,8 @@ final class RemoteFileBrowser: ObservableObject {
     /// 远端家目录，由 sftp 刚连上时的 `pwd` 得到。也用来把标题里的 `~` 展开成真路径。
     @Published private(set) var home: String?
     @Published private(set) var transfers: [Transfer] = []
+    /// 正在执行新建、重命名或删除。一次只跑一个，避免两个目录修改互相覆盖刷新结果。
+    @Published private(set) var isMutating = false
 
     /// 连接层面的问题（会话没连上、sftp 起不来），整块面板级的提示。
     @Published private(set) var connectionError: String?
@@ -99,6 +101,8 @@ final class RemoteFileBrowser: ObservableObject {
     /// 正在跑的列目录调用。**同一时刻只有一个** —— 新的一来就把旧的掐掉，
     /// 因为用户点得快时晚回来的旧结果不该盖住新的。`loading` 也就跟着它整批换。
     private var listingRunner: SFTPRunner?
+    /// 新建、重命名、删除共用的一条串行操作。递归删除会逐步替换 runner，但始终只算一次操作。
+    private var mutationRunner: SFTPRunner?
     /// 传输 id → 它的进程，用于取消。
     private var transferRunners: [UUID: SFTPRunner] = [:]
     /// 传输 id → 落地文件路径，用于轮询下载进度。
@@ -120,6 +124,7 @@ final class RemoteFileBrowser: ObservableObject {
     deinit {
         progressTimer?.invalidate()
         listingRunner?.cancel()
+        mutationRunner?.cancel()
         transferRunners.values.forEach { $0.cancel() }
     }
 
@@ -301,6 +306,257 @@ final class RemoteFileBrowser: ObservableObject {
                 // 每条都有输出却仍然失败：不是某个目录的问题，按连接层的问题报。
                 self.connectionError = message
             }
+        }
+    }
+
+    // MARK: - 新建、重命名与删除
+
+    /// 新建子目录。完成参数 nil 表示成功，否则是给用户看的错误。
+    func createDirectory(in parent: String, name: String, completion: @escaping (String?) -> Void) {
+        guard RemotePath.isValidName(name) else {
+            completion("名称不能为空，不能是 . 或 ..，也不能包含 /。")
+            return
+        }
+        guard let plan = beginMutation(completion: completion) else { return }
+        let path = RemotePath.join(parent, name)
+
+        runMutationStep(plan: plan, commands: [SFTPCommandBuilder.makeDirectory(path)]) { [weak self] outcome in
+            guard let self else { return }
+            self.isMutating = false
+            guard outcome.isSuccess else {
+                completion(self.explain(outcome))
+                return
+            }
+            self.load(parent)
+            completion(nil)
+        }
+    }
+
+    /// 文件、目录与符号链接都由 sftp 的 `rename` 处理；新名字只改最后一段，不允许借机跨目录移动。
+    /// 发 rename 前必须重新列父目录：部分服务端会把同名空目录直接替换掉，不会报错。
+    func rename(_ entry: RemoteFileEntry, to name: String, completion: @escaping (String?) -> Void) {
+        guard RemotePath.isValidName(name) else {
+            completion("名称不能为空，不能是 . 或 ..，也不能包含 /。")
+            return
+        }
+        let parent = RemotePath.parent(of: entry.path)
+        let destination = RemotePath.join(parent, name)
+        guard destination != entry.path else {
+            completion(nil)
+            return
+        }
+        guard let plan = beginMutation(completion: completion) else { return }
+        let wasExpanded = expanded.contains(entry.path)
+
+        runMutationStep(plan: plan, commands: [SFTPCommandBuilder.list(directory: parent)]) { [weak self] outcome in
+            guard let self else { return }
+            guard outcome.isSuccess else {
+                self.isMutating = false
+                completion(self.explain(outcome))
+                return
+            }
+            guard let output = outcome.outputs.first ?? nil else {
+                self.isMutating = false
+                completion("无法确认目标名称是否已存在，请刷新后重试。")
+                return
+            }
+            let entries = SFTPListingParser.parse(output, directory: parent)
+            guard !RemoteFileMutationValidator.renameDestinationExists(destination, in: entries) else {
+                self.isMutating = false
+                completion("“\(name)”已存在，请使用其他名称。")
+                return
+            }
+
+            self.performRename(
+                entry,
+                destination: destination,
+                parent: parent,
+                wasExpanded: wasExpanded,
+                plan: plan,
+                completion: completion
+            )
+        }
+    }
+
+    private func performRename(
+        _ entry: RemoteFileEntry,
+        destination: String,
+        parent: String,
+        wasExpanded: Bool,
+        plan: SSHLaunchPlan,
+        completion: @escaping (String?) -> Void
+    ) {
+        runMutationStep(
+            plan: plan,
+            commands: [SFTPCommandBuilder.rename(from: entry.path, to: destination)]
+        ) { [weak self] outcome in
+            guard let self else { return }
+            self.isMutating = false
+            guard outcome.isSuccess else {
+                completion(self.explain(outcome))
+                return
+            }
+
+            self.forgetSubtree(entry.path)
+            self.selection = destination
+            if entry.kind == .directory, wasExpanded {
+                self.expanded.insert(destination)
+                self.run(listing: [parent, destination].reduced())
+            } else {
+                self.load(parent)
+            }
+            completion(nil)
+        }
+    }
+
+    /// 删除文件或目录。目录会先完整发现子树，再用 `rm` + 由深到浅的 `rmdir` 删除。
+    func delete(_ entry: RemoteFileEntry, completion: @escaping (String?) -> Void) {
+        guard let plan = beginMutation(completion: completion) else { return }
+        if entry.kind == .directory {
+            continueDeletionDiscovery(
+                launchPlan: plan,
+                entry: entry,
+                deletionPlan: SFTPRecursiveDeletionPlan(rootDirectory: entry.path),
+                completion: completion
+            )
+        } else {
+            runMutationStep(plan: plan, commands: [SFTPCommandBuilder.removeFile(entry.path)]) { [weak self] outcome in
+                self?.finishDeletion(entry: entry, outcome: outcome, completion: completion)
+            }
+        }
+    }
+
+    private func beginMutation(completion: (String?) -> Void) -> SSHLaunchPlan? {
+        guard !isMutating else {
+            completion("另一个文件操作正在进行，请稍后再试。")
+            return nil
+        }
+        guard let plan = makePlan() else {
+            completion(connectionError ?? "会话未连接")
+            return nil
+        }
+        isMutating = true
+        return plan
+    }
+
+    private func runMutationStep(
+        plan: SSHLaunchPlan,
+        commands: [String],
+        completion: @escaping (SFTPRunner.Outcome) -> Void
+    ) {
+        let runner = SFTPRunner()
+        mutationRunner = runner
+        runner.start(plan: plan, commands: commands) { [weak self] outcome in
+            guard let self, self.mutationRunner === runner else { return }
+            self.mutationRunner = nil
+            completion(outcome)
+        }
+    }
+
+    /// 递归删除分两阶段：这里仅发现，不删任何东西。某一级列不了就安全停止，不会留下半删的目录。
+    private func continueDeletionDiscovery(
+        launchPlan: SSHLaunchPlan,
+        entry: RemoteFileEntry,
+        deletionPlan: SFTPRecursiveDeletionPlan,
+        completion: @escaping (String?) -> Void
+    ) {
+        guard let directory = deletionPlan.nextDirectory else {
+            let commands = deletionPlan.deletionCommands ?? []
+            continueDeletionCommands(
+                launchPlan: launchPlan,
+                entry: entry,
+                batches: SFTPCommandBuilder.commandBatches(commands),
+                index: 0,
+                completion: completion
+            )
+            return
+        }
+
+        runMutationStep(plan: launchPlan, commands: [SFTPCommandBuilder.list(directory: directory)]) { [weak self] outcome in
+            guard let self else { return }
+            guard outcome.isSuccess, let output = outcome.outputs.first ?? nil else {
+                self.isMutating = false
+                completion(self.explain(outcome))
+                return
+            }
+
+            var next = deletionPlan
+            let contents = SFTPListingParser.parse(output, directory: directory)
+            guard next.record(contents: contents, of: directory) else {
+                self.isMutating = false
+                completion("内部错误：递归删除目录顺序不一致")
+                return
+            }
+            self.continueDeletionDiscovery(
+                launchPlan: launchPlan,
+                entry: entry,
+                deletionPlan: next,
+                completion: completion
+            )
+        }
+    }
+
+    /// 真正删除时按小批次串行跑，避免大目录的脚本塞满 stdin 管道。
+    private func continueDeletionCommands(
+        launchPlan: SSHLaunchPlan,
+        entry: RemoteFileEntry,
+        batches: [[String]],
+        index: Int,
+        completion: @escaping (String?) -> Void
+    ) {
+        guard batches.indices.contains(index) else {
+            finishDeletion(entry: entry, error: nil, completion: completion)
+            return
+        }
+        runMutationStep(plan: launchPlan, commands: batches[index]) { [weak self] outcome in
+            guard let self else { return }
+            guard outcome.isSuccess else {
+                self.finishDeletion(entry: entry, outcome: outcome, completion: completion)
+                return
+            }
+            self.continueDeletionCommands(
+                launchPlan: launchPlan,
+                entry: entry,
+                batches: batches,
+                index: index + 1,
+                completion: completion
+            )
+        }
+    }
+
+    private func finishDeletion(
+        entry: RemoteFileEntry,
+        outcome: SFTPRunner.Outcome,
+        completion: @escaping (String?) -> Void
+    ) {
+        finishDeletion(entry: entry, error: outcome.isSuccess ? nil : explain(outcome), completion: completion)
+    }
+
+    private func finishDeletion(
+        entry: RemoteFileEntry,
+        error: String?,
+        completion: @escaping (String?) -> Void
+    ) {
+        isMutating = false
+        forgetSubtree(entry.path)
+        load(RemotePath.parent(of: entry.path))
+        completion(error)
+    }
+
+    /// 目录改名或删除之后，旧路径底下的缓存已经没有任何可信度，整支丢掉等下次真实列目录。
+    private func forgetSubtree(_ path: String) {
+        let cachedPaths = children.keys.filter { RemotePath.isDescendant($0, of: path) }
+        for key in cachedPaths {
+            children.removeValue(forKey: key)
+        }
+        expanded = Set(expanded.filter { !RemotePath.isDescendant($0, of: path) })
+        loading = Set(loading.filter { !RemotePath.isDescendant($0, of: path) })
+        let errorPaths = errors.keys.filter { RemotePath.isDescendant($0, of: path) }
+        for key in errorPaths {
+            errors.removeValue(forKey: key)
+        }
+        if let selection, RemotePath.isDescendant(selection, of: path) {
+            self.selection = nil
         }
     }
 

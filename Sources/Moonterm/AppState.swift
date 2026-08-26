@@ -35,13 +35,8 @@ final class AppState: ObservableObject {
     /// 正在重命名的分栏（nil 表示没在重命名）。它的小标签会变成输入框。
     @Published private(set) var sessionBeingRenamed: UUID?
 
-    /// 左侧竖栏当前展开的面板，nil = 收起（只留那条窄竖栏）。记在 UserDefaults 里，下次打开照旧。
-    @Published var activeSidebar: SidebarPanel? {
-        didSet {
-            // 空串表示「用户主动收起的」，和「从没设置过」区分开：首次启动默认展开主机面板。
-            UserDefaults.standard.set(activeSidebar?.rawValue ?? "", forKey: Self.sidebarPanelKey)
-        }
-    }
+    /// 左侧竖栏当前展开的面板，nil = 收起（只留那条窄竖栏）。每次启动都从主机面板开始。
+    @Published var activeSidebar: SidebarPanel? = .hosts
 
     /// 展开面板的宽度，可拖右边缘调整。
     @Published private(set) var sidebarWidth: CGFloat {
@@ -57,7 +52,6 @@ final class AppState: ObservableObject {
     private var fileBrowsers: [UUID: RemoteFileBrowser] = [:]
 
     private static let fontSizeKey = "terminalFontSize"
-    private static let sidebarPanelKey = "activeSidebarPanel"
     private static let sidebarWidthKey = "sidebarWidth"
     private var sessionObservations: [UUID: AnyCancellable] = [:]
     private var cancellables: Set<AnyCancellable> = []
@@ -68,12 +62,6 @@ final class AppState: ObservableObject {
         let saved = UserDefaults.standard.double(forKey: Self.fontSizeKey)
         self.fontSize = saved > 0 ? CGFloat(saved) : AppFont.defaultSize
 
-        // 没存过 = 首次启动：把主机面板先展开，不然新用户看不到从哪儿开始。
-        if let stored = UserDefaults.standard.string(forKey: Self.sidebarPanelKey) {
-            self.activeSidebar = SidebarPanel(rawValue: stored)
-        } else {
-            self.activeSidebar = .hosts
-        }
         let storedWidth = UserDefaults.standard.double(forKey: Self.sidebarWidthKey)
         self.sidebarWidth = storedWidth > 0
             ? min(max(CGFloat(storedWidth), Self.minimumSidebarWidth), Self.maximumSidebarWidth)

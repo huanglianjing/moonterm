@@ -198,3 +198,7 @@ Sources/MoontermAskpass/      SSH_ASKPASS 助手（独立可执行文件）
 本地ssh
 
 监控
+
+配置文件导出导入
+
+主题颜色

@@ -266,6 +266,68 @@ final class SFTPRunnerLocalTests: XCTestCase {
         )
     }
 
+    // MARK: - 远端修改
+
+    func testCreateRenameAndDeleteFileAndEmptyDirectory() throws {
+        let folder = directory.appendingPathComponent("新目录")
+        let renamedFolder = directory.appendingPathComponent("改过名")
+        let file = renamedFolder.appendingPathComponent("旧.txt")
+        let renamedFile = renamedFolder.appendingPathComponent("新.txt")
+
+        var outcome = try run([SFTPCommandBuilder.makeDirectory(folder.path)])
+        XCTAssertTrue(outcome.isSuccess, outcome.stderr)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: folder.path))
+
+        outcome = try run([SFTPCommandBuilder.rename(from: folder.path, to: renamedFolder.path)])
+        XCTAssertTrue(outcome.isSuccess, outcome.stderr)
+        try Data("内容".utf8).write(to: file)
+
+        outcome = try run([SFTPCommandBuilder.rename(from: file.path, to: renamedFile.path)])
+        XCTAssertTrue(outcome.isSuccess, outcome.stderr)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: renamedFile.path))
+
+        outcome = try run([
+            SFTPCommandBuilder.removeFile(renamedFile.path),
+            SFTPCommandBuilder.removeDirectory(renamedFolder.path)
+        ])
+        XCTAssertTrue(outcome.isSuccess, outcome.stderr)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: renamedFolder.path))
+    }
+
+    func testRecursiveDeletionPlanRemovesNonEmptyDirectory() throws {
+        let tree = directory.appendingPathComponent("tree")
+        let nested = tree.appendingPathComponent("a/b")
+        let outside = directory.appendingPathComponent("outside")
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        try Data("root".utf8).write(to: tree.appendingPathComponent("root.txt"))
+        try Data("deep".utf8).write(to: nested.appendingPathComponent("deep.txt"))
+        try Data("keep".utf8).write(to: outside.appendingPathComponent("keep.txt"))
+        try FileManager.default.createSymbolicLink(
+            at: tree.appendingPathComponent("outside-link"),
+            withDestinationURL: outside
+        )
+
+        var plan = SFTPRecursiveDeletionPlan(rootDirectory: tree.path)
+        while let path = plan.nextDirectory {
+            let listing = try run([SFTPCommandBuilder.list(directory: path)])
+            XCTAssertTrue(listing.isSuccess, listing.stderr)
+            let entries = SFTPListingParser.parse(try XCTUnwrap(listing.outputs[0]), directory: path)
+            XCTAssertTrue(plan.record(contents: entries, of: path))
+        }
+
+        let commands = try XCTUnwrap(plan.deletionCommands)
+        for batch in SFTPCommandBuilder.commandBatches(commands) {
+            let deletion = try run(batch)
+            XCTAssertTrue(deletion.isSuccess, deletion.stderr)
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: tree.path))
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: outside.appendingPathComponent("keep.txt").path),
+            "递归删除只能删符号链接本身，绝不能跟到目标目录里"
+        )
+    }
+
     // MARK: - 失败与收尾
 
     func testFailureCarriesReadableMessage() throws {

@@ -49,7 +49,7 @@ public final class SFTPRunner {
     ///
     /// - Parameters:
     ///   - plan: `SFTPCommandBuilder.makePlan` 的产物。
-    ///   - commands: 每条一行，会自动加上「出错不中断」的 `-` 前缀。
+    ///   - commands: 每条一行；保持 sftp 批处理默认的「一错即退」，不会加 `-` 前缀。
     ///   - timeout: 超过就掐掉。传 nil 表示不限时（传输用）。
     ///   - completion: **在主队列**回调，一定会被调用一次（包括起不来进程的情况）。
     public func start(

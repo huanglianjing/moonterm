@@ -32,6 +32,10 @@ private struct FilePanel: View {
 
     /// 标题栏那个 `…` 上有没有鼠标。`Menu` 自己不给悬停状态，只能自己接（和主机面板的 `+` 一样）。
     @State private var isOptionsHovering = false
+    /// 新建目录与重命名共用一个小输入框；nil 表示没在输入。
+    @State private var nameRequest: FileNameRequest?
+    /// 删除确认和异步操作错误共用一条 alert 通道，避免同一视图上多个 alert 互相覆盖。
+    @State private var panelAlert: FilePanelAlert?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -41,6 +45,35 @@ private struct FilePanel: View {
         }
         .frame(maxHeight: .infinity)
         .background(ChromeStyle.sidebar)
+        .sheet(item: $nameRequest) { request in
+            FileNameEditor(
+                title: request.title,
+                initialName: request.initialName,
+                actionTitle: request.actionTitle
+            ) { name in
+                perform(request, name: name)
+            }
+        }
+        .alert(item: $panelAlert) { item in
+            switch item.kind {
+            case .confirmDeletion(let entry):
+                return Alert(
+                    title: Text("删除「\(entry.name)」？"),
+                    primaryButton: .destructive(Text("删除")) {
+                        browser.delete(entry) { error in
+                            if let error { panelAlert = FilePanelAlert(.error(error)) }
+                        }
+                    },
+                    secondaryButton: .cancel()
+                )
+            case .error(let message):
+                return Alert(
+                    title: Text("文件操作失败"),
+                    message: Text(message),
+                    dismissButton: .default(Text("好"))
+                )
+            }
+        }
     }
 
     // MARK: - 标题栏
@@ -52,6 +85,14 @@ private struct FilePanel: View {
                 .foregroundStyle(.secondary)
 
             Spacer(minLength: 0)
+
+            if browser.isMutating {
+                ProgressView()
+                    .controlSize(.small)
+                    .scaleEffect(0.65)
+                    .frame(width: 18, height: 18)
+                    .help("正在执行文件操作…")
+            }
 
             ChromeIconButton(systemName: "scope", side: 22, iconSize: 11) {
                 browser.locate()
@@ -160,6 +201,12 @@ private struct FilePanel: View {
                     ) {
                         browser.navigate(to: path)
                     }
+                    .contextMenu {
+                        Button("新建文件夹…") {
+                            nameRequest = .createDirectory(in: path)
+                        }
+                        .disabled(browser.isMutating)
+                    }
                 }
             }
             .padding(.horizontal, 6)
@@ -185,13 +232,15 @@ private struct FilePanel: View {
                         error: browser.errors[row.entry.path],
                         onClick: { clickCount in
                             browser.selection = row.entry.path
-                            // 单击目录就展开/折叠（和 VS Code 的资源管理器一样，也和主机面板的
-                            // 分组标题一致）。**只认第一下** —— 双击会先来 1 再来 2，
-                            // 两次都响应等于原地折返，看着像没反应。
+                            // 第一下只选中，第二下才切换。ClickCatcher 在 mouseDown 就回调，
+                            // 所以若让第一下切换，鼠标还没松开目录就会自己展开或收起。
                             // 文件不管点几下都只是选中：5 GB 的文件不该因为手抖多点一下就开始传。
-                            if clickCount == 1, row.entry.isExpandable {
+                            if clickCount == 2, row.entry.isExpandable {
                                 browser.toggle(row.entry.path)
                             }
+                        },
+                        onToggle: {
+                            browser.toggle(row.entry.path)
                         }
                     )
                     .contextMenu { menu(for: row.entry, browser: browser) }
@@ -287,9 +336,40 @@ private struct FilePanel: View {
 
         Divider()
 
+        if entry.kind == .directory {
+            Button("新建文件夹…") {
+                nameRequest = .createDirectory(in: entry.path)
+            }
+            .disabled(browser.isMutating)
+        }
+
+        Button("重命名…") {
+            nameRequest = .rename(entry)
+        }
+        .disabled(browser.isMutating)
+
+        Button("删除…", role: .destructive) {
+            panelAlert = FilePanelAlert(.confirmDeletion(entry))
+        }
+        .disabled(browser.isMutating)
+
+        Divider()
+
         Button("复制路径") {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(entry.path, forType: .string)
+        }
+    }
+
+    private func perform(_ request: FileNameRequest, name: String) {
+        let completion: (String?) -> Void = { error in
+            if let error { panelAlert = FilePanelAlert(.error(error)) }
+        }
+        switch request.action {
+        case .createDirectory(let parent):
+            browser.createDirectory(in: parent, name: name, completion: completion)
+        case .rename(let entry):
+            browser.rename(entry, to: name, completion: completion)
         }
     }
 
@@ -329,6 +409,135 @@ private struct FilePanel: View {
         panel.message = "上传到 \(target)"
         guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
         browser.upload(panel.urls, to: target)
+    }
+}
+
+// MARK: - 文件操作输入与确认
+
+private struct FileNameRequest: Identifiable {
+
+    enum Action {
+        case createDirectory(parent: String)
+        case rename(RemoteFileEntry)
+    }
+
+    let id = UUID()
+    let action: Action
+
+    static func createDirectory(in parent: String) -> FileNameRequest {
+        FileNameRequest(action: .createDirectory(parent: parent))
+    }
+
+    static func rename(_ entry: RemoteFileEntry) -> FileNameRequest {
+        FileNameRequest(action: .rename(entry))
+    }
+
+    var title: String {
+        switch action {
+        case .createDirectory: return "新建文件夹"
+        case .rename: return "重命名"
+        }
+    }
+
+    var initialName: String {
+        if case .rename(let entry) = action { return entry.name }
+        return ""
+    }
+
+    var actionTitle: String {
+        switch action {
+        case .createDirectory: return "新建"
+        case .rename: return "重命名"
+        }
+    }
+}
+
+private struct FilePanelAlert: Identifiable {
+
+    enum Kind {
+        case confirmDeletion(RemoteFileEntry)
+        case error(String)
+    }
+
+    let id = UUID()
+    let kind: Kind
+
+    init(_ kind: Kind) {
+        self.kind = kind
+    }
+}
+
+private struct FileNameEditor: View {
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var draft: String
+    @FocusState private var isFocused: Bool
+
+    let title: String
+    let initialName: String
+    let actionTitle: String
+    let onCommit: (String) -> Void
+
+    init(
+        title: String,
+        initialName: String,
+        actionTitle: String,
+        onCommit: @escaping (String) -> Void
+    ) {
+        self.title = title
+        self.initialName = initialName
+        self.actionTitle = actionTitle
+        self.onCommit = onCommit
+        _draft = State(initialValue: initialName)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(title)
+                .font(.headline)
+
+            TextField("名称", text: $draft)
+                .textFieldStyle(.roundedBorder)
+                .focused($isFocused)
+                .onSubmit(commit)
+
+            if let validationMessage {
+                Text(validationMessage)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.orange)
+            }
+
+            HStack {
+                Spacer()
+                Button("取消") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button(actionTitle, action: commit)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!canCommit)
+            }
+        }
+        .padding(18)
+        .frame(width: 360)
+        .onAppear { isFocused = true }
+    }
+
+    private var canCommit: Bool {
+        RemotePath.isValidName(draft) && draft != initialName
+    }
+
+    private var validationMessage: String? {
+        if draft.isEmpty { return "名称不能为空。" }
+        if draft == "." || draft == ".." { return "名称不能是 . 或 ..。" }
+        if draft.contains("/") { return "名称不能包含 /。" }
+        if draft.contains("\0") { return "名称不能包含 NUL 字符。" }
+        return nil
+    }
+
+    private func commit() {
+        guard canCommit else { return }
+        let name = draft
+        dismiss()
+        onCommit(name)
     }
 }
 
@@ -418,6 +627,7 @@ private struct FileRow: View {
     let isLoading: Bool
     let error: String?
     let onClick: (Int) -> Void
+    let onToggle: () -> Void
 
     @State private var isHovering = false
 
@@ -425,32 +635,36 @@ private struct FileRow: View {
         HStack(spacing: 4) {
             chevron
 
-            Image(systemName: icon)
-                .font(.system(size: 10))
-                .foregroundStyle(entry.kind == .directory ? ChromeStyle.accent : Color.secondary)
-                .frame(width: 12)
+            HStack(spacing: 4) {
+                Image(systemName: icon)
+                    .font(.system(size: 10))
+                    .foregroundStyle(entry.kind == .directory ? ChromeStyle.accent : Color.secondary)
+                    .frame(width: 12)
 
-            Text(entry.name)
-                .font(.system(size: 11))
-                .lineLimit(1)
-                .truncationMode(.middle)
+                Text(entry.name)
+                    .font(.system(size: 11))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
 
-            Spacer(minLength: 4)
+                Spacer(minLength: 4)
 
-            if isLoading {
-                ProgressView()
-                    .controlSize(.small)
-                    .scaleEffect(0.6)
-                    .frame(width: 12, height: 12)
-            } else if error != nil {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: 9))
-                    .foregroundStyle(.orange)
-            } else if let size = entry.displaySize {
-                Text(size)
-                    .font(.system(size: 9).monospacedDigit())
-                    .foregroundStyle(.tertiary)
+                if isLoading {
+                    ProgressView()
+                        .controlSize(.small)
+                        .scaleEffect(0.6)
+                        .frame(width: 12, height: 12)
+                } else if error != nil {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.orange)
+                } else if let size = entry.displaySize {
+                    Text(size)
+                        .font(.system(size: 9).monospacedDigit())
+                        .foregroundStyle(.tertiary)
+                }
             }
+            .contentShape(Rectangle())
+            .onLeftClick { clickCount, _ in onClick(clickCount) }
         }
         // 一级缩进 10 点：侧栏最窄 160 点，缩得再多几级之后名字就没地方了。
         .padding(.leading, 4 + CGFloat(depth) * 10)
@@ -463,19 +677,21 @@ private struct FileRow: View {
         )
         .contentShape(Rectangle())
         .onHover { isHovering = $0 }
-        .onLeftClick { clickCount, _ in onClick(clickCount) }
         .help(helpText)
     }
 
-    /// 展开状态的指示，**不单独接点击** —— 整行的 `ClickCatcher` 是一层盖在最上面的 NSView，
-    /// 三角自己再挂一层也收不到事件（会被上面那层先吃掉）。点整行就是展开，所以不需要。
+    /// 箭头有独立的点击区域；行主体的点击层只盖住右边内容，两个 AppKit 命中区不会互相抢事件。
     @ViewBuilder
     private var chevron: some View {
         if entry.isExpandable {
-            Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                .font(.system(size: 7, weight: .bold))
-                .foregroundStyle(.secondary)
-                .frame(width: 10, height: 14)
+            Button(action: onToggle) {
+                Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                    .font(.system(size: 7, weight: .bold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 10, height: 14)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
         } else {
             Spacer().frame(width: 10)
         }

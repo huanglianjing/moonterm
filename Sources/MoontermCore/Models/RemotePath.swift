@@ -58,6 +58,18 @@ public enum RemotePath {
         return String(normalized[normalized.index(after: index)...])
     }
 
+    /// 能不能作为远端路径里的**一段名字**。
+    ///
+    /// 空串、`.`、`..` 会改变路径语义，`/` 会把一段拆成多段，NUL 则无法出现在 POSIX 文件名里。
+    /// 空格和通配符都是合法名字，交给 `SFTPCommandBuilder.quote` 原样保护，不能顺手禁掉。
+    public static func isValidName(_ name: String) -> Bool {
+        !name.isEmpty
+            && name != "."
+            && name != ".."
+            && !name.contains("/")
+            && !name.contains("\0")
+    }
+
     /// 最后一段，但**不规范化**。
     ///
     /// 解析 `ls` 输出必须用这个：那里面有 `.` 和 `..` 两项，而规范化会把

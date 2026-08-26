@@ -184,6 +184,49 @@ final class PaneLayoutTests: XCTestCase {
         XCTAssertEqual(root.sessionIDs, [a, b])
     }
 
+    /// 落回当前所在的一侧不能把树拆掉重建：节点 id 一换，UI 层会把长期持有的终端 NSView 拆下来。
+    func testMoveToCurrentTrailingPositionKeepsTreeIdentity() {
+        var root = PaneNode.terminal(a)
+        root.insert(sessionID: b, relativeTo: a, edge: .trailing)
+        let original = root
+
+        XCTAssertFalse(root.move(sessionID: b, relativeTo: a, edge: .trailing))
+        XCTAssertEqual(root, original)
+    }
+
+    func testMoveToCurrentLeadingAndVerticalPositionsKeepsTreeIdentity() {
+        for edge in [PaneEdge.leading, .top, .bottom] {
+            var root = PaneNode.terminal(a)
+            root.insert(sessionID: b, relativeTo: a, edge: edge)
+            let original = root
+
+            XCTAssertFalse(root.move(sessionID: b, relativeTo: a, edge: edge))
+            XCTAssertEqual(root, original)
+        }
+    }
+
+    func testMoveToCurrentPositionInsideNestedSplitKeepsTreeIdentity() {
+        var root = PaneNode.terminal(a)
+        root.insert(sessionID: c, relativeTo: a, edge: .top)
+        root.insert(sessionID: b, relativeTo: a, edge: .trailing)  // v[c, h[a, b]]
+        let original = root
+
+        XCTAssertFalse(root.move(sessionID: b, relativeTo: a, edge: .trailing))
+        XCTAssertEqual(root, original)
+    }
+
+    /// 同一栏里还有别的窗口时，拖出去仍然是在创建独立分栏，不能被“已经相邻”短路。
+    func testMoveFromGroupToAdjacentEdgeStillSplits() {
+        var root = PaneNode.terminal(a)
+        root.join(sessionID: b, into: a, at: nil)
+        root.insert(sessionID: c, relativeTo: a, edge: .trailing)  // h[[a, b], c]
+
+        XCTAssertTrue(root.move(sessionID: b, relativeTo: c, edge: .leading))
+        XCTAssertEqual(root.paneCount, 3)
+        XCTAssertEqual(root.sessionIDs, [a, b, c])
+        XCTAssertEqual(root.group(containing: a)?.sessionIDs, [a])
+    }
+
     // MARK: - 会话组（一个分栏里放多个会话）
 
     func testJoinPutsSessionIntoAnotherPanesGroup() {

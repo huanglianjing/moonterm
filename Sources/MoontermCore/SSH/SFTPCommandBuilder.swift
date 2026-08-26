@@ -83,6 +83,26 @@ public enum SFTPCommandBuilder {
         "put \(recursive ? "-rp" : "-p") \(quote(local)) \(quote(remote))"
     }
 
+    /// 新建远端目录。
+    public static func makeDirectory(_ path: String) -> String {
+        "mkdir \(quote(path))"
+    }
+
+    /// 重命名文件、目录或符号链接。目标路径必须包含新名字，不能只传名字。
+    public static func rename(from source: String, to destination: String) -> String {
+        "rename \(quote(source)) \(quote(destination))"
+    }
+
+    /// 删除文件或符号链接。目录必须走 `removeDirectory`，sftp 的 `rm` 不支持递归参数。
+    public static func removeFile(_ path: String) -> String {
+        "rm \(quote(path))"
+    }
+
+    /// 删除空目录。非空目录要先把里面的文件和子目录清掉。
+    public static func removeDirectory(_ path: String) -> String {
+        "rmdir \(quote(path))"
+    }
+
     /// 把路径包成 sftp 认的一个参数。
     ///
     /// 只需要转义 `\` 和 `"`：**双引号会把 glob 一起关掉**（实测过 —— 不加引号时
@@ -115,6 +135,34 @@ public enum SFTPCommandBuilder {
     /// 而 `splitBatchOutput` 里已经拿到的那几段照样能用。
     public static func batchScript(_ commands: [String]) -> String {
         commands.map { "\($0)\n" }.joined()
+    }
+
+    /// 把大量命令切成不会塞满 stdin 管道的小批次。
+    ///
+    /// 递归删除可能有几千条 `rm` / `rmdir`；`SFTPRunner` 是先写完整脚本再读输出，单批超过管道
+    /// 缓冲就可能两边互等。单条命令即使超过上限也会独占一批，不能悄悄丢掉。
+    public static func commandBatches(
+        _ commands: [String],
+        maximumScriptBytes: Int = 32 * 1024
+    ) -> [[String]] {
+        guard !commands.isEmpty else { return [] }
+        let limit = max(maximumScriptBytes, 1)
+        var result: [[String]] = []
+        var current: [String] = []
+        var currentBytes = 0
+
+        for command in commands {
+            let bytes = command.utf8.count + 1  // batchScript 会补一个换行。
+            if !current.isEmpty, currentBytes + bytes > limit {
+                result.append(current)
+                current = []
+                currentBytes = 0
+            }
+            current.append(command)
+            currentBytes += bytes
+        }
+        if !current.isEmpty { result.append(current) }
+        return result
     }
 
     /// 把一次调用的 stdout 按命令切开。

@@ -58,6 +58,16 @@ final class SFTPCommandBuilderTests: XCTestCase {
         )
     }
 
+    func testMutationCommands() {
+        XCTAssertEqual(SFTPCommandBuilder.makeDirectory("/a/new folder"), "mkdir \"/a/new folder\"")
+        XCTAssertEqual(
+            SFTPCommandBuilder.rename(from: "/a/old", to: "/a/new"),
+            "rename \"/a/old\" \"/a/new\""
+        )
+        XCTAssertEqual(SFTPCommandBuilder.removeFile("/a/file"), "rm \"/a/file\"")
+        XCTAssertEqual(SFTPCommandBuilder.removeDirectory("/a/empty"), "rmdir \"/a/empty\"")
+    }
+
     // MARK: - 批处理
 
     /// 不加 sftp 的「错了也接着跑」前缀：加了它 sftp 一律以退出码 0 收场，
@@ -66,6 +76,22 @@ final class SFTPCommandBuilderTests: XCTestCase {
         XCTAssertEqual(
             SFTPCommandBuilder.batchScript(["pwd", "ls -lan \"/\""]),
             "pwd\nls -lan \"/\"\n"
+        )
+    }
+
+    func testCommandBatchesStayUnderLimitAndKeepOrder() {
+        let commands = ["1234", "56", "789", "x"]
+        let batches = SFTPCommandBuilder.commandBatches(commands, maximumScriptBytes: 8)
+
+        XCTAssertEqual(batches, [["1234", "56"], ["789", "x"]])
+        XCTAssertEqual(batches.flatMap { $0 }, commands)
+        XCTAssertTrue(batches.allSatisfy { SFTPCommandBuilder.batchScript($0).utf8.count <= 8 })
+    }
+
+    func testCommandLongerThanBatchLimitIsKeptAlone() {
+        XCTAssertEqual(
+            SFTPCommandBuilder.commandBatches(["a-very-long-command"], maximumScriptBytes: 2),
+            [["a-very-long-command"]]
         )
     }
 
