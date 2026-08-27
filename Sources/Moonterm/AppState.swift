@@ -13,6 +13,8 @@ final class AppState: ObservableObject {
     let configStore: ConfigStore
     /// 拖拽状态。独立观察，避免拖拽每帧重算整棵分栏树。
     let drag = DragController()
+    /// 分隔线悬停高亮。T / 十字接点的一组线需要共享状态，但不应触发整个 AppState 刷新。
+    let dividerHighlight = PaneDividerHighlightController()
 
     /// 所有活着的会话（不分 tab）。负责生命周期与字号，顺序无意义。
     @Published private(set) var sessions: [SSHSession] = []

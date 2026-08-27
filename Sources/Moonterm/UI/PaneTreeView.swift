@@ -283,17 +283,25 @@ private struct PaneDivider: View {
     @State private var isHovering = false
     @State private var isDragging = false
     @EnvironmentObject private var appState: AppState
+    @EnvironmentObject private var dividerHighlight: PaneDividerHighlightController
+
+    private var identity: PaneDividerHighlightController.Identity {
+        .init(splitID: splitID, dividerIndex: dividerIndex)
+    }
 
     var body: some View {
+        let isEmphasized = dividerHighlight.emphasized.contains(identity) || isDragging
+        let visualThickness = isEmphasized ? thickness * 2 : thickness
+
         ZStack {
             // 透明层负责命中，下面的负 padding 会把它伸进相邻分栏，但不会占掉分栏空间。
             Rectangle().fill(Color.clear)
 
             Rectangle()
-                .fill(isHovering || isDragging ? ChromeStyle.dividerHovered : ChromeStyle.divider)
+                .fill(isEmphasized ? ChromeStyle.dividerHovered : ChromeStyle.divider)
                 .frame(
-                    width: axis == .horizontal ? thickness : nil,
-                    height: axis == .vertical ? thickness : nil
+                    width: axis == .horizontal ? visualThickness : nil,
+                    height: axis == .vertical ? visualThickness : nil
                 )
         }
         .frame(
@@ -306,10 +314,16 @@ private struct PaneDivider: View {
             switch phase {
             case .active(let location):
                 isHovering = true
-                cursor(at: location).set()
+                if !isDragging {
+                    emphasize(at: location)
+                    cursor(at: location).set()
+                }
             case .ended:
                 isHovering = false
-                if !isDragging { NSCursor.arrow.set() }
+                if !isDragging {
+                    dividerHighlight.clear(owner: identity)
+                    NSCursor.arrow.set()
+                }
             }
         }
         .gesture(
@@ -318,12 +332,19 @@ private struct PaneDivider: View {
                 .onChanged { value in
                     isDragging = true
                     // 接点图标按起手位置锁定；拖开后不能突然退回单轴图标。
+                    emphasize(at: value.startLocation)
                     cursor(at: value.startLocation).set()
                     onChanged(value.startLocation, value.translation)
                 }
-                .onEnded { _ in
+                .onEnded { value in
                     isDragging = false
-                    if !isHovering { NSCursor.arrow.set() }
+                    if isHovering {
+                        emphasize(at: value.location)
+                        cursor(at: value.location).set()
+                    } else {
+                        dividerHighlight.clear(owner: identity)
+                        NSCursor.arrow.set()
+                    }
                     onEnded()
                 }
         )
@@ -331,6 +352,25 @@ private struct PaneDivider: View {
             TapGesture(count: 2).onEnded(onDoubleClick)
         )
         .help("拖动调整比例，双击恢复居中")
+        .onDisappear {
+            dividerHighlight.clear(owner: identity)
+        }
+    }
+
+    /// 普通位置只高亮当前线；T / 十字接点高亮本次实际会一起移动的完整分隔线组。
+    private func emphasize(at point: CGPoint) {
+        let geometries = appState.drag.paneDividers.map(\.geometry)
+        let linked = PaneDividerJunction.linkedDividers(
+            dragging: splitID,
+            dividerIndex: dividerIndex,
+            at: point,
+            among: geometries,
+            sourceHitOutset: Self.dragOutset
+        )
+        let emphasized = linked.isEmpty
+            ? Set([identity])
+            : Set(linked.map(PaneDividerHighlightController.Identity.init))
+        dividerHighlight.update(owner: identity, emphasized: emphasized)
     }
 
     /// 几何 preference 尚未完成首轮回填时，至少先给出当前单线的标准调整图标。

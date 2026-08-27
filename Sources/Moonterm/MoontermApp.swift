@@ -12,6 +12,8 @@ struct MoontermApp: App {
                 .environmentObject(appState)
                 // 拖拽状态单独注入：只有 tab 条和落点提示层观察它，拖拽时不会带着整棵分栏树重画。
                 .environmentObject(appState.drag)
+                // 接点高亮也单独观察：只有各条分隔线需要跟着它更新粗细与颜色。
+                .environmentObject(appState.dividerHighlight)
                 .onAppear {
                     // 让 AppDelegate 能在退出前终止所有 ssh 进程。
                     appDelegate.appState = appState

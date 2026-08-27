@@ -1,5 +1,39 @@
 import AppKit
+import Combine
 import MoontermCore
+
+/// 分隔线接点的共享高亮状态。单独观察，避免悬停时让 `AppState` 和整棵终端树一起刷新。
+final class PaneDividerHighlightController: ObservableObject {
+
+    struct Identity: Hashable {
+        let splitID: UUID
+        let dividerIndex: Int
+
+        init(splitID: UUID, dividerIndex: Int) {
+            self.splitID = splitID
+            self.dividerIndex = dividerIndex
+        }
+
+        init(_ geometry: PaneDividerGeometry) {
+            self.init(splitID: geometry.splitID, dividerIndex: geometry.dividerIndex)
+        }
+    }
+
+    @Published private(set) var emphasized: Set<Identity> = []
+    /// 接点处可能有多个扩展热区重叠；只允许最后收到 active 的那条线清除这一组。
+    private var owner: Identity?
+
+    func update(owner: Identity, emphasized next: Set<Identity>) {
+        self.owner = owner
+        if emphasized != next { emphasized = next }
+    }
+
+    func clear(owner: Identity) {
+        guard self.owner == owner else { return }
+        self.owner = nil
+        if !emphasized.isEmpty { emphasized = [] }
+    }
+}
 
 /// 给分隔线接点提供方向明确的鼠标图标。
 ///

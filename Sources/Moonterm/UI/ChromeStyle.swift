@@ -26,7 +26,7 @@ enum ChromeStyle {
 
     /// 分栏之间可拖动的分割线。
     static let divider = Color.white.opacity(0.12)
-    static let dividerHovered = Color.white.opacity(0.28)
+    static let dividerHovered = Color.white.opacity(0.45)
 
     /// 鼠标悬停时的浅浅一层高亮。
     static let hover = Color.white.opacity(0.10)
