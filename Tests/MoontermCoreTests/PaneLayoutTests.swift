@@ -118,24 +118,24 @@ final class PaneLayoutTests: XCTestCase {
         XCTAssertEqual(describe(root)?.sessions, [a, b])
     }
 
-    func testGridPresetCreatesFourEqualPanesInVisualOrder() {
+    func testGridPresetCreatesFourEqualPanesWithColumnsOutside() {
         var root = PaneNode.terminal(a)
 
         XCTAssertTrue(root.split(relativeTo: a, preset: .grid, newSessionIDs: [b, c, d]))
-        XCTAssertEqual(root.sessionIDs, [a, b, c, d])
+        XCTAssertEqual(root.sessionIDs, [a, c, b, d], "外层按左列、右列遍历")
         XCTAssertEqual(root.paneCount, 4)
 
-        guard case .split(let axis, let rows) = root.content else {
-            return XCTFail("四宫格根节点应为上下布局")
+        guard case .split(let axis, let columns) = root.content else {
+            return XCTFail("四宫格根节点应为左右布局")
         }
-        XCTAssertEqual(axis, .vertical)
-        assertFractions(rows.map(\.fraction), [0.5, 0.5])
-        XCTAssertEqual(describe(rows[0].node)?.axis, .horizontal)
-        XCTAssertEqual(describe(rows[0].node)?.sessions, [a, b])
-        assertFractions(describe(rows[0].node)?.fractions ?? [], [0.5, 0.5])
-        XCTAssertEqual(describe(rows[1].node)?.axis, .horizontal)
-        XCTAssertEqual(describe(rows[1].node)?.sessions, [c, d])
-        assertFractions(describe(rows[1].node)?.fractions ?? [], [0.5, 0.5])
+        XCTAssertEqual(axis, .horizontal)
+        assertFractions(columns.map(\.fraction), [0.5, 0.5])
+        XCTAssertEqual(describe(columns[0].node)?.axis, .vertical)
+        XCTAssertEqual(describe(columns[0].node)?.sessions, [a, c])
+        assertFractions(describe(columns[0].node)?.fractions ?? [], [0.5, 0.5])
+        XCTAssertEqual(describe(columns[1].node)?.axis, .vertical)
+        XCTAssertEqual(describe(columns[1].node)?.sessions, [b, d])
+        assertFractions(describe(columns[1].node)?.fractions ?? [], [0.5, 0.5])
     }
 
     /// 目标旁边已经有分栏时，四宫格只能吃掉目标原来的那一半，不能重排整棵树。
@@ -145,15 +145,17 @@ final class PaneLayoutTests: XCTestCase {
 
         XCTAssertTrue(root.split(relativeTo: a, preset: .grid, newSessionIDs: [b, c, UUID()]))
 
-        guard case .split(let axis, let children) = root.content else {
+        guard case .split(let axis, let columns) = root.content else {
             return XCTFail("根节点应保留左右布局")
         }
         XCTAssertEqual(axis, .horizontal)
-        XCTAssertEqual(children.count, 2)
-        assertFractions(children.map(\.fraction), [0.5, 0.5])
-        XCTAssertEqual(describe(children[0].node)?.axis, .vertical)
-        XCTAssertEqual(describe(children[0].node)?.sessions.count, 2)
-        XCTAssertEqual(children[1].node.activeSessionID, d)
+        XCTAssertEqual(columns.count, 3, "同轴的左右布局会拍平到原有父节点")
+        assertFractions(columns.map(\.fraction), [0.25, 0.25, 0.5])
+        XCTAssertEqual(describe(columns[0].node)?.axis, .vertical)
+        XCTAssertEqual(describe(columns[0].node)?.sessions, [a, c])
+        XCTAssertEqual(describe(columns[1].node)?.axis, .vertical)
+        XCTAssertEqual(describe(columns[1].node)?.sessions.count, 2)
+        XCTAssertEqual(columns[2].node.activeSessionID, d)
     }
 
     func testPresetRejectsWrongOrDuplicateSessionsWithoutChangingTree() {
@@ -541,6 +543,278 @@ final class PaneLayoutTests: XCTestCase {
         XCTAssertEqual(root, original)
         XCTAssertFalse(root.equalizeAdjacentChildren(atDivider: 0, forSplit: UUID()))
         XCTAssertEqual(root, original)
+    }
+
+    // MARK: - 分隔线接点
+
+    func testDividerJunctionLinksWholeCross() {
+        let verticalID = UUID()
+        let leftID = UUID()
+        let rightID = UUID()
+        let dividers = [
+            PaneDividerGeometry(
+                splitID: verticalID,
+                dividerIndex: 0,
+                splitAxis: .horizontal,
+                frame: CGRect(x: 99, y: 0, width: 2, height: 200)
+            ),
+            PaneDividerGeometry(
+                splitID: leftID,
+                dividerIndex: 0,
+                splitAxis: .vertical,
+                frame: CGRect(x: 0, y: 99, width: 99, height: 2)
+            ),
+            PaneDividerGeometry(
+                splitID: rightID,
+                dividerIndex: 0,
+                splitAxis: .vertical,
+                frame: CGRect(x: 101, y: 99, width: 99, height: 2)
+            )
+        ]
+
+        let linked = PaneDividerJunction.linkedDividers(
+            dragging: leftID,
+            dividerIndex: 0,
+            at: CGPoint(x: 99, y: 100),
+            among: dividers
+        )
+
+        XCTAssertEqual(Set(linked.map(\.splitID)), Set([verticalID, leftID, rightID]))
+        XCTAssertEqual(PaneDividerJunction.dragShape(
+            dragging: leftID,
+            dividerIndex: 0,
+            at: CGPoint(x: 99, y: 100),
+            among: dividers
+        ), .cross)
+    }
+
+    func testDividerJunctionLinksTShape() {
+        let verticalID = UUID()
+        let branchID = UUID()
+        let dividers = [
+            PaneDividerGeometry(
+                splitID: verticalID,
+                dividerIndex: 0,
+                splitAxis: .horizontal,
+                frame: CGRect(x: 99, y: 0, width: 2, height: 200)
+            ),
+            PaneDividerGeometry(
+                splitID: branchID,
+                dividerIndex: 0,
+                splitAxis: .vertical,
+                frame: CGRect(x: 101, y: 99, width: 100, height: 2)
+            )
+        ]
+
+        let linked = PaneDividerJunction.linkedDividers(
+            dragging: verticalID,
+            dividerIndex: 0,
+            at: CGPoint(x: 100, y: 100),
+            among: dividers
+        )
+
+        XCTAssertEqual(Set(linked.map(\.splitID)), Set([verticalID, branchID]))
+        XCTAssertEqual(PaneDividerJunction.dragShape(
+            dragging: verticalID,
+            dividerIndex: 0,
+            at: CGPoint(x: 100, y: 100),
+            among: dividers
+        ), .teeLeft)
+    }
+
+    func testDividerDragShapeRecognizesSinglesAndFourTOrientations() {
+        let point = CGPoint(x: 100, y: 100)
+
+        func shape(_ parts: [(PaneAxis, CGRect)]) -> PaneDividerDragShape? {
+            let dividers = parts.map { part in
+                PaneDividerGeometry(
+                    splitID: UUID(),
+                    dividerIndex: 0,
+                    splitAxis: part.0,
+                    frame: part.1
+                )
+            }
+            return PaneDividerJunction.dragShape(
+                dragging: dividers[0].splitID,
+                dividerIndex: 0,
+                at: point,
+                among: dividers
+            )
+        }
+
+        XCTAssertEqual(shape([
+            (.horizontal, CGRect(x: 99, y: 0, width: 2, height: 200))
+        ]), .leftRight)
+        XCTAssertEqual(shape([
+            (.vertical, CGRect(x: 0, y: 99, width: 200, height: 2))
+        ]), .upDown)
+        XCTAssertEqual(shape([
+            (.vertical, CGRect(x: 0, y: 99, width: 200, height: 2)),
+            (.horizontal, CGRect(x: 99, y: 101, width: 2, height: 99))
+        ]), .teeTop)
+        XCTAssertEqual(shape([
+            (.vertical, CGRect(x: 0, y: 99, width: 200, height: 2)),
+            (.horizontal, CGRect(x: 99, y: 0, width: 2, height: 99))
+        ]), .teeBottom)
+        XCTAssertEqual(shape([
+            (.horizontal, CGRect(x: 99, y: 0, width: 2, height: 200)),
+            (.vertical, CGRect(x: 101, y: 99, width: 99, height: 2))
+        ]), .teeLeft)
+        XCTAssertEqual(shape([
+            (.horizontal, CGRect(x: 99, y: 0, width: 2, height: 200)),
+            (.vertical, CGRect(x: 0, y: 99, width: 99, height: 2))
+        ]), .teeRight)
+    }
+
+    func testDividerJunctionAcceptsFivePointGapButNotMore() {
+        let verticalID = UUID()
+        let nearID = UUID()
+        let farID = UUID()
+        let dividers = [
+            PaneDividerGeometry(
+                splitID: verticalID,
+                dividerIndex: 0,
+                splitAxis: .horizontal,
+                frame: CGRect(x: 99, y: 0, width: 2, height: 200)
+            ),
+            PaneDividerGeometry(
+                splitID: nearID,
+                dividerIndex: 0,
+                splitAxis: .vertical,
+                frame: CGRect(x: 0, y: 99, width: 94, height: 2)
+            ),
+            PaneDividerGeometry(
+                splitID: farID,
+                dividerIndex: 0,
+                splitAxis: .vertical,
+                frame: CGRect(x: 0, y: 99, width: 93, height: 2)
+            )
+        ]
+
+        let linked = PaneDividerJunction.linkedDividers(
+            dragging: verticalID,
+            dividerIndex: 0,
+            // 按在 2 点主动线的远侧，仍应按两条线之间的 5 点空隙判定。
+            at: CGPoint(x: 101, y: 100),
+            among: dividers
+        )
+
+        XCTAssertEqual(Set(linked.map(\.splitID)), Set([verticalID, nearID]))
+    }
+
+    func testDividerJunctionDoesNotLinkAwayFromIntersection() {
+        let verticalID = UUID()
+        let horizontalID = UUID()
+        let dividers = [
+            PaneDividerGeometry(
+                splitID: verticalID,
+                dividerIndex: 0,
+                splitAxis: .horizontal,
+                frame: CGRect(x: 99, y: 0, width: 2, height: 200)
+            ),
+            PaneDividerGeometry(
+                splitID: horizontalID,
+                dividerIndex: 0,
+                splitAxis: .vertical,
+                frame: CGRect(x: 0, y: 99, width: 200, height: 2)
+            )
+        ]
+
+        XCTAssertTrue(PaneDividerJunction.linkedDividers(
+            dragging: verticalID,
+            dividerIndex: 0,
+            at: CGPoint(x: 100, y: 40),
+            among: dividers
+        ).isEmpty)
+    }
+
+    func testDividerDragShapeUsesExpandedSourceHitOutset() {
+        let verticalID = UUID()
+        let horizontalID = UUID()
+        let dividers = [
+            PaneDividerGeometry(
+                splitID: verticalID,
+                dividerIndex: 0,
+                splitAxis: .horizontal,
+                frame: CGRect(x: 99, y: 0, width: 2, height: 200)
+            ),
+            PaneDividerGeometry(
+                splitID: horizontalID,
+                dividerIndex: 0,
+                splitAxis: .vertical,
+                frame: CGRect(x: 0, y: 99, width: 200, height: 2)
+            )
+        ]
+
+        XCTAssertEqual(PaneDividerJunction.dragShape(
+            dragging: verticalID,
+            dividerIndex: 0,
+            at: CGPoint(x: 107, y: 100),
+            among: dividers,
+            sourceHitOutset: 6
+        ), .cross)
+        XCTAssertNil(PaneDividerJunction.dragShape(
+            dragging: verticalID,
+            dividerIndex: 0,
+            at: CGPoint(x: 108, y: 100),
+            among: dividers,
+            sourceHitOutset: 6
+        ))
+    }
+
+    // MARK: - 分隔线磁吸
+
+    func testDividerMagnetSnapsParallelVerticalLinesAtBoundary() {
+        let source = PaneDividerGeometry(
+            splitID: UUID(),
+            dividerIndex: 0,
+            splitAxis: .horizontal,
+            frame: CGRect(x: 99, y: 0, width: 2, height: 100)
+        )
+        let lower = PaneDividerGeometry(
+            splitID: UUID(),
+            dividerIndex: 0,
+            splitAxis: .horizontal,
+            frame: CGRect(x: 149, y: 102, width: 2, height: 100)
+        )
+
+        XCTAssertEqual(PaneDividerMagnet.snappedTranslation(
+            dragging: source,
+            translation: 44,
+            among: [source, lower]
+        ), 50)
+        XCTAssertEqual(PaneDividerMagnet.snappedTranslation(
+            dragging: source,
+            translation: 43,
+            among: [source, lower]
+        ), 43)
+    }
+
+    func testDividerMagnetSnapsHorizontalLinesAndIgnoresPerpendicularOnes() {
+        let source = PaneDividerGeometry(
+            splitID: UUID(),
+            dividerIndex: 0,
+            splitAxis: .vertical,
+            frame: CGRect(x: 0, y: 99, width: 100, height: 2)
+        )
+        let parallel = PaneDividerGeometry(
+            splitID: UUID(),
+            dividerIndex: 0,
+            splitAxis: .vertical,
+            frame: CGRect(x: 102, y: 129, width: 100, height: 2)
+        )
+        let perpendicular = PaneDividerGeometry(
+            splitID: UUID(),
+            dividerIndex: 0,
+            splitAxis: .horizontal,
+            frame: CGRect(x: 123, y: 0, width: 2, height: 200)
+        )
+
+        XCTAssertEqual(PaneDividerMagnet.snappedTranslation(
+            dragging: source,
+            translation: 24,
+            among: [source, parallel, perpendicular]
+        ), 30)
     }
 
     // MARK: - 落点判定

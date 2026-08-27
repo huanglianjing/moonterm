@@ -38,8 +38,14 @@ private struct PaneNodeView: View {
 
 private struct SplitView: View {
 
-    /// 分割线厚度，同时也是拖拽热区。
-    static let dividerThickness: CGFloat = 6
+    /// 磁吸必须用起手时的全局位置；若每帧读取已经移动过的主动线，就会再次累计位移。
+    private struct MagnetResizeBase {
+        let source: PaneDividerGeometry
+        let dividers: [PaneDividerGeometry]
+    }
+
+    /// 分隔线的视觉与布局厚度；命中范围由 `PaneDivider` 单独向两侧扩展。
+    static let dividerThickness: CGFloat = 2
     /// 分栏最短边：拖分割线时不能把任何一栏压得比这更小。
     static let minPaneLength: CGFloat = 120
 
@@ -53,6 +59,11 @@ private struct SplitView: View {
     /// 拖分割线时记住是哪条线、起手占比是多少：每帧拿它加上位移算绝对值，
     /// 避免把上一帧的输出又当输入而累积误差。
     @State private var resizeBase: (dividerIndex: Int, fractions: [CGFloat])?
+    /// 从十字 / T 形接点起手时，把接点里的其余分隔线及其起手布局固定下来。
+    /// 拖动过程中不重新命中，避免接点移动后半途解锁或换到别的线。
+    @State private var linkedResizeBases: [DragController.DividerHandle]?
+    /// 平行线的磁吸目标同样在起手时拍快照，防止布局刷新改变参照物。
+    @State private var magnetResizeBase: MagnetResizeBase?
 
     var body: some View {
         GeometryReader { proxy in
@@ -85,27 +96,67 @@ private struct SplitView: View {
 
             if index < children.count - 1 {
                 PaneDivider(
+                    splitID: splitID,
+                    dividerIndex: index,
                     axis: axis,
                     thickness: Self.dividerThickness,
-                    onChanged: { translation in
-                        resize(dividerIndex: index, translation: translation, available: available)
+                    onChanged: { startLocation, translation in
+                        resize(
+                            dividerIndex: index,
+                            startLocation: startLocation,
+                            translation: translation,
+                            available: available
+                        )
                     },
-                    onEnded: { resizeBase = nil },
+                    onEnded: {
+                        resizeBase = nil
+                        linkedResizeBases = nil
+                        magnetResizeBase = nil
+                    },
                     onDoubleClick: {
                         resizeBase = nil
+                        linkedResizeBases = nil
+                        magnetResizeBase = nil
                         appState.centerDivider(at: index, splitID: splitID, tabID: tab.id)
                     }
                 )
+                .reportFrame(PaneDividersKey.self) { frame in
+                    guard isActive else { return [] }
+                    return [DragController.DividerHandle(
+                        geometry: PaneDividerGeometry(
+                            splitID: splitID,
+                            dividerIndex: index,
+                            splitAxis: axis,
+                            frame: frame
+                        ),
+                        tabID: tab.id,
+                        availableLength: available,
+                        fractions: children.map(\.fraction)
+                    )]
+                }
+                // 命中层会伸进两边分栏，必须放在终端视图上方才能收到悬停与拖动事件。
+                .zIndex(1)
             }
         }
     }
 
     /// 拖分割线：只在相邻两栏之间搬占比，别的分栏不受影响。
     ///
-    /// `translation` 必须是**全局坐标**里的位移 —— 分割线本身会随占比移动，
+    /// `translation` 必须是**全局坐标**里的位移 —— 分隔线本身会随占比移动，
     /// 用它自己的局部坐标系算位移等于把输出接回输入，线就会跟着鼠标来回跳。
-    private func resize(dividerIndex: Int, translation: CGFloat, available: CGFloat) {
-        guard available > 0 else { return }
+    private func resize(
+        dividerIndex: Int,
+        startLocation: CGPoint,
+        translation: CGSize,
+        available: CGFloat
+    ) {
+        let linked: [DragController.DividerHandle]
+        if let linkedResizeBases {
+            linked = linkedResizeBases
+        } else {
+            linked = resolveLinkedDividers(dividerIndex: dividerIndex, at: startLocation)
+            linkedResizeBases = linked
+        }
 
         let base: [CGFloat]
         if let resizeBase, resizeBase.dividerIndex == dividerIndex {
@@ -114,12 +165,95 @@ private struct SplitView: View {
             base = children.map { $0.fraction }
             resizeBase = (dividerIndex, base)
         }
-        guard base.indices.contains(dividerIndex + 1) else { return }
+
+        let rawOwnTranslation = axis == .horizontal ? translation.width : translation.height
+        let ownTranslation: CGFloat
+        if linked.isEmpty, let magnet = resolveMagnetBase(dividerIndex: dividerIndex) {
+            ownTranslation = PaneDividerMagnet.snappedTranslation(
+                dragging: magnet.source,
+                translation: rawOwnTranslation,
+                among: magnet.dividers
+            )
+        } else {
+            // 十字 / T 形从接点起手时整组移动，不再让其中一条吸回仍在原位的平行线。
+            ownTranslation = rawOwnTranslation
+        }
+        if let updated = Self.resizedFractions(
+            base: base,
+            dividerIndex: dividerIndex,
+            translation: ownTranslation,
+            available: available
+        ) {
+            appState.setFractions(updated, splitID: splitID, tabID: tab.id)
+        }
+
+        for handle in linked {
+            let linkedTranslation = handle.geometry.splitAxis == .horizontal
+                ? translation.width
+                : translation.height
+            guard let updated = Self.resizedFractions(
+                base: handle.fractions,
+                dividerIndex: handle.geometry.dividerIndex,
+                translation: linkedTranslation,
+                available: handle.availableLength
+            ) else { continue }
+            appState.setFractions(
+                updated,
+                splitID: handle.geometry.splitID,
+                tabID: handle.tabID
+            )
+        }
+    }
+
+    /// 首帧找到主动线并冻结全部平行候选；后续帧只复用这份几何。
+    private func resolveMagnetBase(dividerIndex: Int) -> MagnetResizeBase? {
+        if let magnetResizeBase { return magnetResizeBase }
+
+        let dividers = appState.drag.paneDividers.map(\.geometry)
+        guard let source = dividers.first(where: {
+            $0.splitID == splitID && $0.dividerIndex == dividerIndex
+        }) else { return nil }
+        let base = MagnetResizeBase(source: source, dividers: dividers)
+        magnetResizeBase = base
+        return base
+    }
+
+    /// 找到接点附近的整组分隔线，并去掉当前这条（它仍走原有的本地拖动状态）。
+    private func resolveLinkedDividers(
+        dividerIndex: Int,
+        at startLocation: CGPoint
+    ) -> [DragController.DividerHandle] {
+        let handles = appState.drag.paneDividers
+        let linked = PaneDividerJunction.linkedDividers(
+            dragging: splitID,
+            dividerIndex: dividerIndex,
+            at: startLocation,
+            among: handles.map(\.geometry),
+            sourceHitOutset: PaneDivider.dragOutset
+        )
+        guard !linked.isEmpty else { return [] }
+
+        return handles.filter { handle in
+            guard !(handle.geometry.splitID == splitID && handle.geometry.dividerIndex == dividerIndex) else {
+                return false
+            }
+            return linked.contains(handle.geometry)
+        }
+    }
+
+    /// 用起手占比计算某一条分隔线的新占比；一次只在它左右（或上下）的相邻两栏之间搬空间。
+    private static func resizedFractions(
+        base: [CGFloat],
+        dividerIndex: Int,
+        translation: CGFloat,
+        available: CGFloat
+    ) -> [CGFloat]? {
+        guard available > 0, base.indices.contains(dividerIndex + 1) else { return nil }
 
         // 全程用「点」计算再换回占比，避免小数占比反复归一化带来的抖动。
         let pairLength = (base[dividerIndex] + base[dividerIndex + 1]) * available
         let minLength = min(Self.minPaneLength, pairLength / 2 - 1)
-        guard pairLength > 2, minLength > 0 else { return }
+        guard pairLength > 2, minLength > 0 else { return nil }
 
         let wanted = base[dividerIndex] * available + translation
         let leading = min(max(wanted.rounded(), minLength), pairLength - minLength)
@@ -127,7 +261,7 @@ private struct SplitView: View {
         var updated = base
         updated[dividerIndex] = leading / available
         updated[dividerIndex + 1] = (pairLength - leading) / available
-        appState.setFractions(updated, splitID: splitID, tabID: tab.id)
+        return updated
     }
 }
 
@@ -135,42 +269,80 @@ private struct SplitView: View {
 
 private struct PaneDivider: View {
 
+    /// 视觉线两侧各多出的命中范围；2 点线最终得到 14 点宽的拖动热区。
+    static let dragOutset: CGFloat = 6
+
+    let splitID: UUID
+    let dividerIndex: Int
     let axis: PaneAxis
     let thickness: CGFloat
-    let onChanged: (CGFloat) -> Void
+    let onChanged: (CGPoint, CGSize) -> Void
     let onEnded: () -> Void
     let onDoubleClick: () -> Void
 
     @State private var isHovering = false
+    @State private var isDragging = false
+    @EnvironmentObject private var appState: AppState
 
     var body: some View {
-        Rectangle()
-            .fill(isHovering ? ChromeStyle.dividerHovered : ChromeStyle.divider)
-            .frame(
-                width: axis == .horizontal ? thickness : nil,
-                height: axis == .vertical ? thickness : nil
-            )
-            .contentShape(Rectangle())
-            .onHover { hovering in
-                isHovering = hovering
-                if hovering {
-                    (axis == .horizontal ? NSCursor.resizeLeftRight : NSCursor.resizeUpDown).push()
-                } else {
-                    NSCursor.pop()
-                }
+        ZStack {
+            // 透明层负责命中，下面的负 padding 会把它伸进相邻分栏，但不会占掉分栏空间。
+            Rectangle().fill(Color.clear)
+
+            Rectangle()
+                .fill(isHovering || isDragging ? ChromeStyle.dividerHovered : ChromeStyle.divider)
+                .frame(
+                    width: axis == .horizontal ? thickness : nil,
+                    height: axis == .vertical ? thickness : nil
+                )
+        }
+        .frame(
+            width: axis == .horizontal ? thickness + Self.dragOutset * 2 : nil,
+            height: axis == .vertical ? thickness + Self.dragOutset * 2 : nil
+        )
+        .contentShape(Rectangle())
+        .padding(axis == .horizontal ? .horizontal : .vertical, -Self.dragOutset)
+        .onContinuousHover(coordinateSpace: .global) { phase in
+            switch phase {
+            case .active(let location):
+                isHovering = true
+                cursor(at: location).set()
+            case .ended:
+                isHovering = false
+                if !isDragging { NSCursor.arrow.set() }
             }
-            .gesture(
-                // 坐标空间必须是 .global：分割线自己会动，局部坐标系算出来的位移是自激的。
-                DragGesture(minimumDistance: 1, coordinateSpace: .global)
-                    .onChanged { value in
-                        onChanged(axis == .horizontal ? value.translation.width : value.translation.height)
-                    }
-                    .onEnded { _ in onEnded() }
-            )
-            .simultaneousGesture(
-                TapGesture(count: 2).onEnded(onDoubleClick)
-            )
-            .help("拖动调整比例，双击恢复居中")
+        }
+        .gesture(
+            // 坐标空间必须是 .global：分割线自己会动，局部坐标系算出来的位移是自激的。
+            DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                .onChanged { value in
+                    isDragging = true
+                    // 接点图标按起手位置锁定；拖开后不能突然退回单轴图标。
+                    cursor(at: value.startLocation).set()
+                    onChanged(value.startLocation, value.translation)
+                }
+                .onEnded { _ in
+                    isDragging = false
+                    if !isHovering { NSCursor.arrow.set() }
+                    onEnded()
+                }
+        )
+        .simultaneousGesture(
+            TapGesture(count: 2).onEnded(onDoubleClick)
+        )
+        .help("拖动调整比例，双击恢复居中")
+    }
+
+    /// 几何 preference 尚未完成首轮回填时，至少先给出当前单线的标准调整图标。
+    private func cursor(at point: CGPoint) -> NSCursor {
+        let shape = PaneDividerJunction.dragShape(
+            dragging: splitID,
+            dividerIndex: dividerIndex,
+            at: point,
+            among: appState.drag.paneDividers.map(\.geometry),
+            sourceHitOutset: Self.dragOutset
+        ) ?? (axis == .horizontal ? .leftRight : .upDown)
+        return PaneDividerCursor.cursor(for: shape)
     }
 }
 

@@ -9,6 +9,186 @@ public enum PaneAxis: String, Equatable, Codable, Sendable {
     case vertical
 }
 
+/// 一条分隔线在窗口全局坐标里的几何信息。
+///
+/// `splitAxis` 是子分栏的排列方向，因此 `.horizontal` 对应画面中的竖线，
+/// `.vertical` 对应画面中的横线。
+public struct PaneDividerGeometry: Equatable {
+    public let splitID: UUID
+    public let dividerIndex: Int
+    public let splitAxis: PaneAxis
+    public let frame: CGRect
+
+    public init(splitID: UUID, dividerIndex: Int, splitAxis: PaneAxis, frame: CGRect) {
+        self.splitID = splitID
+        self.dividerIndex = dividerIndex
+        self.splitAxis = splitAxis
+        self.frame = frame
+    }
+}
+
+/// 鼠标所在位置允许怎样调整分栏；T 形名称对应它在画面中的字形。
+public enum PaneDividerDragShape: Equatable, Sendable {
+    /// 普通竖分隔线，只能左右调整。
+    case leftRight
+    /// 普通横分隔线，只能上下调整。
+    case upDown
+    /// `┬`：左右加向下三个方向。
+    case teeTop
+    /// `┴`：左右加向上三个方向。
+    case teeBottom
+    /// `├`：上下加向右三个方向。
+    case teeLeft
+    /// `┤`：上下加向左三个方向。
+    case teeRight
+    /// `┼`：四个方向。
+    case cross
+}
+
+/// 判定一次分隔线拖动是否从十字或 T 形接点起手。
+public enum PaneDividerJunction {
+
+    /// 接点允许的最大视觉间隔。SwiftUI 的布局坐标以点计，这里按界面里的 5 像素语义处理。
+    public static let tolerance: CGFloat = 5
+
+    /// 返回接点附近需要一起移动的整组分隔线；只有横、竖两个方向都出现时才算有效接点。
+    ///
+    /// 返回整组而不只是最近的一条：树形布局中的十字通常由一条竖线和左右两条横线组成，
+    /// 三条都锁住才能让十字在拖动后仍然对齐。空数组表示本次仍按普通单线拖动处理。
+    /// `sourceHitOutset` 只控制鼠标离主动线多远仍算命中，不改变两条线之间的 `tolerance`。
+    public static func linkedDividers(
+        dragging splitID: UUID,
+        dividerIndex: Int,
+        at point: CGPoint,
+        among dividers: [PaneDividerGeometry],
+        tolerance: CGFloat = PaneDividerJunction.tolerance,
+        sourceHitOutset: CGFloat = PaneDividerJunction.tolerance
+    ) -> [PaneDividerGeometry] {
+        guard tolerance >= 0, sourceHitOutset >= 0,
+              let source = dividers.first(where: {
+                  $0.splitID == splitID && $0.dividerIndex == dividerIndex
+              }),
+              distance(from: point, to: source.frame) <= sourceHitOutset
+        else { return [] }
+
+        // 起点可能落在 2 点宽分隔线的另一侧：两条线本身相隔 5 点时，起点到另一条线
+        // 最远会是 7 点。把主动线的短边算进去，判定的才是「线与线间隔」而不是鼠标到线的距离。
+        let sourceThickness = min(source.frame.width, source.frame.height)
+        let reach = tolerance + sourceThickness
+        let nearby = dividers.filter {
+            distance(between: source.frame, and: $0.frame) <= tolerance
+                && distance(from: point, to: $0.frame) <= reach
+        }
+        guard nearby.contains(where: { $0.splitAxis != source.splitAxis }) else { return [] }
+        return nearby
+    }
+
+    /// 返回鼠标当前位置应显示的调整光标形状；找不到主动线时返回 nil。
+    /// `sourceHitOutset` 与界面的透明拖动热区一致，和接点容差分别计算。
+    public static func dragShape(
+        dragging splitID: UUID,
+        dividerIndex: Int,
+        at point: CGPoint,
+        among dividers: [PaneDividerGeometry],
+        tolerance: CGFloat = PaneDividerJunction.tolerance,
+        sourceHitOutset: CGFloat = PaneDividerJunction.tolerance
+    ) -> PaneDividerDragShape? {
+        guard tolerance >= 0, sourceHitOutset >= 0,
+              let source = dividers.first(where: {
+                  $0.splitID == splitID && $0.dividerIndex == dividerIndex
+              }),
+              distance(from: point, to: source.frame) <= sourceHitOutset
+        else { return nil }
+
+        let linked = linkedDividers(
+            dragging: splitID,
+            dividerIndex: dividerIndex,
+            at: point,
+            among: dividers,
+            tolerance: tolerance,
+            sourceHitOutset: sourceHitOutset
+        )
+        guard !linked.isEmpty else {
+            return source.splitAxis == .horizontal ? .leftRight : .upDown
+        }
+
+        // 分栏最短边远大于容差；超过接点 5 点仍有线段，就代表那个方向确实有一条“腿”。
+        var hasLeft = false
+        var hasRight = false
+        var hasTop = false
+        var hasBottom = false
+        for divider in linked {
+            switch divider.splitAxis {
+            case .horizontal:
+                hasTop = hasTop || divider.frame.minY < point.y - tolerance
+                hasBottom = hasBottom || divider.frame.maxY > point.y + tolerance
+            case .vertical:
+                hasLeft = hasLeft || divider.frame.minX < point.x - tolerance
+                hasRight = hasRight || divider.frame.maxX > point.x + tolerance
+            }
+        }
+
+        switch (hasLeft, hasRight, hasTop, hasBottom) {
+        case (true, true, true, true): return .cross
+        case (true, true, false, true): return .teeTop
+        case (true, true, true, false): return .teeBottom
+        case (false, true, true, true): return .teeLeft
+        case (true, false, true, true): return .teeRight
+        default:
+            // 极小布局或多条线恰好挤在一起时也允许双轴拖动；四向图标比误报成单轴更准确。
+            return .cross
+        }
+    }
+
+    /// 点在矩形内时距离为 0；在外面时取到最近边或角的欧氏距离。
+    private static func distance(from point: CGPoint, to rect: CGRect) -> CGFloat {
+        let dx = max(rect.minX - point.x, point.x - rect.maxX, 0)
+        let dy = max(rect.minY - point.y, point.y - rect.maxY, 0)
+        return hypot(dx, dy)
+    }
+
+    /// 两个矩形相交或接触时距离为 0。
+    private static func distance(between lhs: CGRect, and rhs: CGRect) -> CGFloat {
+        let dx = max(lhs.minX - rhs.maxX, rhs.minX - lhs.maxX, 0)
+        let dy = max(lhs.minY - rhs.maxY, rhs.minY - lhs.maxY, 0)
+        return hypot(dx, dy)
+    }
+}
+
+/// 平行分隔线的磁吸对齐。竖线比较全局 x 中心，横线比较全局 y 中心。
+public enum PaneDividerMagnet {
+
+    /// 鼠标目标进入这个距离后吸附；超过后立即恢复自由拖动。
+    public static let tolerance: CGFloat = 6
+
+    /// 返回吸附后的起手位移。没有同向候选或尚未进入阈值时原样返回 `translation`。
+    public static func snappedTranslation(
+        dragging source: PaneDividerGeometry,
+        translation: CGFloat,
+        among dividers: [PaneDividerGeometry],
+        tolerance: CGFloat = PaneDividerMagnet.tolerance
+    ) -> CGFloat {
+        guard tolerance >= 0 else { return translation }
+
+        let sourcePosition = position(of: source)
+        let proposedPosition = sourcePosition + translation
+        let candidate = dividers
+            .filter {
+                $0.splitAxis == source.splitAxis
+                    && !($0.splitID == source.splitID && $0.dividerIndex == source.dividerIndex)
+            }
+            .map { (position: position(of: $0), distance: abs(position(of: $0) - proposedPosition)) }
+            .min { $0.distance < $1.distance }
+
+        guard let candidate, candidate.distance <= tolerance else { return translation }
+        return candidate.position - sourcePosition
+    }
+
+    private static func position(of divider: PaneDividerGeometry) -> CGFloat {
+        divider.splitAxis == .horizontal ? divider.frame.midX : divider.frame.midY
+    }
+}
+
 /// 相对某个分栏的落点方位。
 public enum PaneEdge: String, Equatable, Codable, Sendable, CaseIterable {
     case leading
@@ -310,9 +490,9 @@ public struct PaneNode: Identifiable, Equatable {
 
     /// 把包含 `target` 的分栏一次变成标题栏菜单指定的布局。
     ///
-    /// 操作先在副本上完成，任何一步失败都不改原树。四宫格按「左上保留当前分栏，
-    /// 右上、左下、右下依次放入三个新会话」排列；用逐边插入构造，才能在目标外面
-    /// 已经有同轴 split 时仍只平分目标原本占据的范围。
+    /// 操作先在副本上完成，任何一步失败都不改原树。四宫格先左右分栏，再分别上下分栏，
+    /// 并按「左上保留当前分栏，右上、左下、右下依次放入三个新会话」排列；用逐边插入
+    /// 构造，才能在目标外面已经有同轴 split 时仍只平分目标原本占据的范围。
     @discardableResult
     public mutating func split(
         relativeTo target: UUID,
@@ -340,9 +520,9 @@ public struct PaneNode: Identifiable, Equatable {
         case .grid:
             let topRight = newSessionIDs[0]
             let bottomLeft = newSessionIDs[1]
-            guard updated.insert(sessionID: bottomLeft, relativeTo: target, edge: .bottom),
-                  updated.insert(sessionID: topRight, relativeTo: target, edge: .trailing),
-                  updated.insert(sessionID: newSessionIDs[2], relativeTo: bottomLeft, edge: .trailing)
+            guard updated.insert(sessionID: topRight, relativeTo: target, edge: .trailing),
+                  updated.insert(sessionID: bottomLeft, relativeTo: target, edge: .bottom),
+                  updated.insert(sessionID: newSessionIDs[2], relativeTo: topRight, edge: .bottom)
             else { return false }
         }
 

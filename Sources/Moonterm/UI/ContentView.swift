@@ -76,6 +76,9 @@ struct ContentView: View {
         .onPreferenceChange(PaneHeadersKey.self) { headers in
             appState.drag.paneHeaders = headers
         }
+        .onPreferenceChange(PaneDividersKey.self) { dividers in
+            appState.drag.paneDividers = dividers
+        }
         .onChange(of: appState.selectedTabID) { _ in
             focusTerminal()
         }

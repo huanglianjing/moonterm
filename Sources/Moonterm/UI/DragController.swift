@@ -50,6 +50,14 @@ final class DragController: ObservableObject {
         let sessionCount: Int
     }
 
+    /// 分隔线的几何与起手布局快照。十字 / T 形联动时，主动线拿这份数据更新其余分隔线。
+    struct DividerHandle: Equatable {
+        let geometry: PaneDividerGeometry
+        let tabID: UUID
+        let availableLength: CGFloat
+        let fractions: [CGFloat]
+    }
+
     struct State: Equatable {
         var payload: Payload
         /// 跟随指针的「幽灵」上显示的名字。
@@ -68,6 +76,8 @@ final class DragController: ObservableObject {
     var paneFrames: [UUID: CGRect] = [:]
     /// 当前可见 tab 里各分栏的小标签条。
     var paneHeaders: [PaneHeader] = []
+    /// 当前可见 tab 里的全部分隔线；用于判定十字 / T 形接点。
+    var paneDividers: [DividerHandle] = []
     /// tab 条上各 tab 的矩形，按显示顺序。
     var tabFrames: [TabFrame] = []
     /// 整条 tab 条的矩形。
@@ -266,6 +276,18 @@ struct PaneHeadersKey: PreferenceKey {
     static var defaultValue: [DragController.PaneHeader] = []
 
     static func reduce(value: inout [DragController.PaneHeader], nextValue: () -> [DragController.PaneHeader]) {
+        value.append(contentsOf: nextValue())
+    }
+}
+
+/// 当前可见 tab 里的全部分隔线。
+struct PaneDividersKey: PreferenceKey {
+    static var defaultValue: [DragController.DividerHandle] = []
+
+    static func reduce(
+        value: inout [DragController.DividerHandle],
+        nextValue: () -> [DragController.DividerHandle]
+    ) {
         value.append(contentsOf: nextValue())
     }
 }
