@@ -44,11 +44,15 @@ struct HostSidebarView: View {
         .frame(maxHeight: .infinity)
         .background(ChromeStyle.sidebar)
         .background(
-            HostPanelKeyboardCatcher(focusRequest: keyboardFocusRequest) {
-                requestSelectionDeletion()
-            }
+            HostPanelKeyboardCatcher(
+                focusRequest: keyboardFocusRequest,
+                onDelete: requestSelectionDeletion,
+                onDuplicate: duplicateSelection
+            )
             .frame(width: 0, height: 0)
         )
+        // 只监听、不命中：终端、tab 条或别的区域仍收到原点击，同时主机选区立刻收起。
+        .background(HostPanelSelectionBoundary { selection.clear() })
         .alert(
             deletionTitle,
             isPresented: Binding(
@@ -129,8 +133,14 @@ struct HostSidebarView: View {
             Spacer(minLength: 0)
 
             Menu {
-                Button("添加主机…") { appState.beginCreatingHost() }
-                Button("添加分组") { addGroup() }
+                Button("添加主机…") {
+                    selection.clear()
+                    appState.beginCreatingHost()
+                }
+                Button("添加分组") {
+                    selection.clear()
+                    addGroup()
+                }
             } label: {
                 // 和 tab 上那些 ✕ 同一块方形底。**没有**按下压暗那一层：`Menu` 不给按下状态，
                 // 换成 `.menuStyle(.button)` + 自定义 buttonStyle 之后菜单直接弹不出来了，
@@ -147,6 +157,7 @@ struct HostSidebarView: View {
         }
         .padding(.horizontal, 8)
         .frame(height: 28)
+        .simultaneousGesture(TapGesture().onEnded { selection.clear() })
     }
 
     private var empty: some View {
@@ -212,7 +223,10 @@ struct HostSidebarView: View {
                 hostCount: store.hosts(inGroup: group.id).count,
                 isRenaming: groupBeingRenamed == group.id,
                 isBeingDragged: drag.isDragging(.group(group.id)),
-                onToggle: { store.setGroup(id: group.id, collapsed: !group.isCollapsed) },
+                onToggle: {
+                    selection.clear()
+                    store.setGroup(id: group.id, collapsed: !group.isCollapsed)
+                },
                 onDrag: { phase in handleGroupDrag(group, phase: phase) },
                 onRename: { name in
                     store.renameGroup(id: group.id, to: name)
@@ -342,6 +356,14 @@ struct HostSidebarView: View {
         hostsPendingDeletion = targets
     }
 
+    /// `⌘D` 和右键菜单里的「复制」保持同一边界：多选时不猜该复制哪台。
+    private func duplicateSelection() {
+        guard selection.count == 1,
+              let id = store.displayOrderedHostIDs.first(where: { selection.contains($0) })
+        else { return }
+        store.duplicate(id: id)
+    }
+
     @ViewBuilder
     private func menu(for host: HostConfig) -> some View {
         let targets = menuTargets(for: host)
@@ -424,16 +446,19 @@ private struct HostPanelKeyboardCatcher: NSViewRepresentable {
 
     let focusRequest: Int
     let onDelete: () -> Void
+    let onDuplicate: () -> Void
 
     func makeNSView(context: Context) -> KeyView {
         let view = KeyView()
         view.lastFocusRequest = focusRequest
         view.onDelete = onDelete
+        view.onDuplicate = onDuplicate
         return view
     }
 
     func updateNSView(_ nsView: KeyView, context: Context) {
         nsView.onDelete = onDelete
+        nsView.onDuplicate = onDuplicate
         guard nsView.lastFocusRequest != focusRequest else { return }
         nsView.lastFocusRequest = focusRequest
 
@@ -448,8 +473,28 @@ private struct HostPanelKeyboardCatcher: NSViewRepresentable {
 
         var lastFocusRequest = 0
         var onDelete: (() -> Void)?
+        var onDuplicate: (() -> Void)?
+        private var duplicateShortcutMonitor: Any?
 
         override var acceptsFirstResponder: Bool { true }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            stopMonitoringDuplicateShortcut()
+            guard window != nil else { return }
+
+            // 菜单快捷键匹配发生在 first responder 的 keyDown 之前。和 AppDelegate 接 ⌘W
+            // 一样从本地监视器抢先判断，才能保证这里的 ⌘D 不被别的菜单项接走。
+            duplicateShortcutMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                guard let self,
+                      window?.firstResponder === self,
+                      event.modifierFlags.intersection(.deviceIndependentFlagsMask) == [.command],
+                      event.charactersIgnoringModifiers?.lowercased() == "d"
+                else { return event }
+                onDuplicate?()
+                return nil
+            }
+        }
 
         override func keyDown(with event: NSEvent) {
             // 51 是 Backspace，117 是 Forward Delete；Fn+Backspace 到这里时也会成为 117。
@@ -459,6 +504,83 @@ private struct HostPanelKeyboardCatcher: NSViewRepresentable {
                 return
             }
             onDelete?()
+        }
+
+        private func stopMonitoringDuplicateShortcut() {
+            if let duplicateShortcutMonitor {
+                NSEvent.removeMonitor(duplicateShortcutMonitor)
+                self.duplicateShortcutMonitor = nil
+            }
+        }
+
+        deinit {
+            stopMonitoringDuplicateShortcut()
+        }
+    }
+}
+
+// MARK: - 面板外点击
+
+/// 透明的面板边界，只用本地事件监视器观察鼠标落点，不参与命中测试。
+///
+/// SwiftTerm 是 AppKit 的 NSView，SwiftUI 父级手势收不到它的点击；从事件入口观察才能让
+/// 「点终端取消主机选中」可靠生效，同时又不截断终端原本的鼠标选择与聚焦。
+private struct HostPanelSelectionBoundary: NSViewRepresentable {
+
+    let onClickOutside: () -> Void
+
+    func makeNSView(context: Context) -> BoundaryView {
+        let view = BoundaryView()
+        view.onClickOutside = onClickOutside
+        return view
+    }
+
+    func updateNSView(_ nsView: BoundaryView, context: Context) {
+        nsView.onClickOutside = onClickOutside
+    }
+
+    static func dismantleNSView(_ nsView: BoundaryView, coordinator: ()) {
+        nsView.stopMonitoring()
+    }
+
+    final class BoundaryView: NSView {
+
+        var onClickOutside: (() -> Void)?
+        private var monitor: Any?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            stopMonitoring()
+            guard window != nil else { return }
+
+            monitor = NSEvent.addLocalMonitorForEvents(
+                matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+            ) { [weak self] event in
+                guard let self, let panelWindow = window else { return event }
+
+                if event.window === panelWindow {
+                    let point = convert(event.locationInWindow, from: nil)
+                    if !bounds.contains(point) {
+                        onClickOutside?()
+                    }
+                } else if event.window?.sheetParent === panelWindow {
+                    onClickOutside?()
+                }
+                return event
+            }
+        }
+
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        func stopMonitoring() {
+            if let monitor {
+                NSEvent.removeMonitor(monitor)
+                self.monitor = nil
+            }
+        }
+
+        deinit {
+            stopMonitoring()
         }
     }
 }

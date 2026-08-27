@@ -99,6 +99,131 @@ final class PaneLayoutTests: XCTestCase {
         XCTAssertEqual(root.paneCount, 3)
     }
 
+    // MARK: - 预设布局
+
+    func testSideBySidePresetKeepsCurrentPaneOnTheLeft() {
+        var root = PaneNode.terminal(a)
+
+        XCTAssertTrue(root.split(relativeTo: a, preset: .sideBySide, newSessionIDs: [b]))
+        XCTAssertEqual(describe(root)?.axis, .horizontal)
+        XCTAssertEqual(describe(root)?.sessions, [a, b])
+        assertFractions(describe(root)?.fractions ?? [], [0.5, 0.5])
+    }
+
+    func testStackedPresetKeepsCurrentPaneOnTop() {
+        var root = PaneNode.terminal(a)
+
+        XCTAssertTrue(root.split(relativeTo: a, preset: .stacked, newSessionIDs: [b]))
+        XCTAssertEqual(describe(root)?.axis, .vertical)
+        XCTAssertEqual(describe(root)?.sessions, [a, b])
+    }
+
+    func testGridPresetCreatesFourEqualPanesInVisualOrder() {
+        var root = PaneNode.terminal(a)
+
+        XCTAssertTrue(root.split(relativeTo: a, preset: .grid, newSessionIDs: [b, c, d]))
+        XCTAssertEqual(root.sessionIDs, [a, b, c, d])
+        XCTAssertEqual(root.paneCount, 4)
+
+        guard case .split(let axis, let rows) = root.content else {
+            return XCTFail("四宫格根节点应为上下布局")
+        }
+        XCTAssertEqual(axis, .vertical)
+        assertFractions(rows.map(\.fraction), [0.5, 0.5])
+        XCTAssertEqual(describe(rows[0].node)?.axis, .horizontal)
+        XCTAssertEqual(describe(rows[0].node)?.sessions, [a, b])
+        assertFractions(describe(rows[0].node)?.fractions ?? [], [0.5, 0.5])
+        XCTAssertEqual(describe(rows[1].node)?.axis, .horizontal)
+        XCTAssertEqual(describe(rows[1].node)?.sessions, [c, d])
+        assertFractions(describe(rows[1].node)?.fractions ?? [], [0.5, 0.5])
+    }
+
+    /// 目标旁边已经有分栏时，四宫格只能吃掉目标原来的那一半，不能重排整棵树。
+    func testGridPresetStaysInsideTargetsExistingArea() {
+        var root = PaneNode.terminal(a)
+        root.insert(sessionID: d, relativeTo: a, edge: .trailing)
+
+        XCTAssertTrue(root.split(relativeTo: a, preset: .grid, newSessionIDs: [b, c, UUID()]))
+
+        guard case .split(let axis, let children) = root.content else {
+            return XCTFail("根节点应保留左右布局")
+        }
+        XCTAssertEqual(axis, .horizontal)
+        XCTAssertEqual(children.count, 2)
+        assertFractions(children.map(\.fraction), [0.5, 0.5])
+        XCTAssertEqual(describe(children[0].node)?.axis, .vertical)
+        XCTAssertEqual(describe(children[0].node)?.sessions.count, 2)
+        XCTAssertEqual(children[1].node.activeSessionID, d)
+    }
+
+    func testPresetRejectsWrongOrDuplicateSessionsWithoutChangingTree() {
+        let original = PaneNode.terminal(a)
+        var root = original
+
+        XCTAssertFalse(root.split(relativeTo: a, preset: .grid, newSessionIDs: [b]))
+        XCTAssertEqual(root, original)
+        XCTAssertFalse(root.split(relativeTo: a, preset: .grid, newSessionIDs: [b, b, c]))
+        XCTAssertEqual(root, original)
+    }
+
+    // MARK: - 窗口排列
+
+    func testArrangeGroupSideBySideUsesOriginalWindowOrderAndEqualFractions() {
+        var root = PaneNode.terminal(a)
+        root.join(sessionID: b, into: a, at: nil)
+        root.join(sessionID: c, into: a, at: nil)
+
+        XCTAssertTrue(root.arrangeGroup(containing: b, axis: .horizontal))
+        XCTAssertEqual(describe(root)?.axis, .horizontal)
+        XCTAssertEqual(describe(root)?.sessions, [a, b, c])
+        assertFractions(describe(root)?.fractions ?? [], [1.0 / 3, 1.0 / 3, 1.0 / 3])
+        XCTAssertTrue(root.sessionIDs.allSatisfy { root.group(containing: $0)?.count == 1 })
+    }
+
+    func testArrangeGroupVerticallyUsesOriginalWindowOrder() {
+        var root = PaneNode.terminal(a)
+        root.join(sessionID: b, into: a, at: nil)
+
+        XCTAssertTrue(root.arrangeGroup(containing: a, axis: .vertical))
+        XCTAssertEqual(describe(root)?.axis, .vertical)
+        XCTAssertEqual(describe(root)?.sessions, [a, b])
+    }
+
+    func testArrangeGroupIntoMatchingParentOnlyDividesTargetsFraction() {
+        var root = PaneNode.terminal(a)
+        root.join(sessionID: b, into: a, at: nil)
+        root.insert(sessionID: c, relativeTo: a, edge: .trailing)
+
+        XCTAssertTrue(root.arrangeGroup(containing: a, axis: .horizontal))
+        XCTAssertEqual(describe(root)?.axis, .horizontal)
+        XCTAssertEqual(describe(root)?.sessions, [a, b, c])
+        assertFractions(describe(root)?.fractions ?? [], [0.25, 0.25, 0.5])
+    }
+
+    func testArrangeGroupAcrossParentAxisNestsInsideTargetArea() {
+        var root = PaneNode.terminal(a)
+        root.join(sessionID: b, into: a, at: nil)
+        root.insert(sessionID: c, relativeTo: a, edge: .bottom)
+
+        XCTAssertTrue(root.arrangeGroup(containing: a, axis: .horizontal))
+
+        guard case .split(let axis, let children) = root.content else {
+            return XCTFail("外层应保留上下布局")
+        }
+        XCTAssertEqual(axis, .vertical)
+        XCTAssertEqual(describe(children[0].node)?.axis, .horizontal)
+        XCTAssertEqual(describe(children[0].node)?.sessions, [a, b])
+        XCTAssertEqual(children[1].node.activeSessionID, c)
+    }
+
+    func testArrangeSingleWindowDoesNothing() {
+        let original = PaneNode.terminal(a)
+        var root = original
+
+        XCTAssertFalse(root.arrangeGroup(containing: a, axis: .horizontal))
+        XCTAssertEqual(root, original)
+    }
+
     // MARK: - 删除
 
     func testRemoveRedistributesFractionsProportionally() {
@@ -374,6 +499,48 @@ final class PaneLayoutTests: XCTestCase {
         guard case .split(_, let updated) = root.content else { return XCTFail("应为 split") }
         assertFractions(describe(updated[1].node)?.fractions ?? [], [0.8, 0.2])
         assertFractions(describe(root)?.fractions ?? [], [0.5, 0.5], "外层占比不受影响")
+    }
+
+    // MARK: - 分隔线归中
+
+    func testEqualizeDividerOnlyChangesItsAdjacentPair() {
+        var root = PaneNode.terminal(a)
+        root.insert(sessionID: b, relativeTo: a, edge: .trailing)
+        root.insert(sessionID: c, relativeTo: b, edge: .trailing)
+        XCTAssertTrue(root.setFractions([0.5, 0.1, 0.4], forSplit: root.id))
+
+        XCTAssertTrue(root.equalizeAdjacentChildren(atDivider: 1, forSplit: root.id))
+        assertFractions(describe(root)?.fractions ?? [], [0.5, 0.25, 0.25])
+    }
+
+    func testEqualizeDividerReachesNestedSplit() {
+        var root = PaneNode.terminal(a)
+        root.insert(sessionID: b, relativeTo: a, edge: .trailing)
+        root.insert(sessionID: c, relativeTo: b, edge: .bottom)
+
+        guard case .split(_, let children) = root.content else {
+            return XCTFail("根节点应为左右分栏")
+        }
+        let nestedID = children[1].node.id
+        XCTAssertTrue(root.setFractions([0.8, 0.2], forSplit: nestedID))
+        XCTAssertTrue(root.equalizeAdjacentChildren(atDivider: 0, forSplit: nestedID))
+
+        guard case .split(_, let updated) = root.content else {
+            return XCTFail("根节点应保持左右分栏")
+        }
+        assertFractions(describe(updated[1].node)?.fractions ?? [], [0.5, 0.5])
+        assertFractions(updated.map(\.fraction), [0.5, 0.5])
+    }
+
+    func testEqualizeDividerRejectsInvalidTargetWithoutChangingTree() {
+        var root = PaneNode.terminal(a)
+        root.insert(sessionID: b, relativeTo: a, edge: .trailing)
+        let original = root
+
+        XCTAssertFalse(root.equalizeAdjacentChildren(atDivider: 1, forSplit: root.id))
+        XCTAssertEqual(root, original)
+        XCTAssertFalse(root.equalizeAdjacentChildren(atDivider: 0, forSplit: UUID()))
+        XCTAssertEqual(root, original)
     }
 
     // MARK: - 落点判定

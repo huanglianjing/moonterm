@@ -32,6 +32,23 @@ public enum PaneEdge: String, Equatable, Codable, Sendable, CaseIterable {
     }
 }
 
+/// 标题栏菜单提供的整组分栏方式。
+///
+/// 当前分栏会保留原来的窗口组；其余位置各放一个新会话。
+public enum PaneSplitPreset: Equatable, Sendable {
+    case sideBySide
+    case stacked
+    case grid
+
+    /// 应为这个布局新建的会话数。
+    public var newSessionCount: Int {
+        switch self {
+        case .sideBySide, .stacked: return 1
+        case .grid: return 3
+        }
+    }
+}
+
 // MARK: - 落点判定
 
 /// 指针落在某个分栏矩形内时代表的意图。
@@ -291,6 +308,89 @@ public struct PaneNode: Identifiable, Equatable {
         }
     }
 
+    /// 把包含 `target` 的分栏一次变成标题栏菜单指定的布局。
+    ///
+    /// 操作先在副本上完成，任何一步失败都不改原树。四宫格按「左上保留当前分栏，
+    /// 右上、左下、右下依次放入三个新会话」排列；用逐边插入构造，才能在目标外面
+    /// 已经有同轴 split 时仍只平分目标原本占据的范围。
+    @discardableResult
+    public mutating func split(
+        relativeTo target: UUID,
+        preset: PaneSplitPreset,
+        newSessionIDs: [UUID]
+    ) -> Bool {
+        guard contains(sessionID: target),
+              newSessionIDs.count == preset.newSessionCount,
+              Set(newSessionIDs).count == newSessionIDs.count,
+              newSessionIDs.allSatisfy({ !contains(sessionID: $0) })
+        else { return false }
+
+        var updated = self
+        switch preset {
+        case .sideBySide:
+            guard updated.insert(sessionID: newSessionIDs[0], relativeTo: target, edge: .trailing) else {
+                return false
+            }
+
+        case .stacked:
+            guard updated.insert(sessionID: newSessionIDs[0], relativeTo: target, edge: .bottom) else {
+                return false
+            }
+
+        case .grid:
+            let topRight = newSessionIDs[0]
+            let bottomLeft = newSessionIDs[1]
+            guard updated.insert(sessionID: bottomLeft, relativeTo: target, edge: .bottom),
+                  updated.insert(sessionID: topRight, relativeTo: target, edge: .trailing),
+                  updated.insert(sessionID: newSessionIDs[2], relativeTo: bottomLeft, edge: .trailing)
+            else { return false }
+        }
+
+        self = updated
+        return true
+    }
+
+    /// 把包含 `target` 的分栏里叠放的窗口全部展开，按 `axis` 等分排列。
+    ///
+    /// 只有一个窗口时没有可排列的内容，返回 `false`。如果目标外层已经是同方向的 split，
+    /// 新窗口直接插到那一层，并且只平分目标原本的占比，避免产生同轴嵌套。
+    @discardableResult
+    public mutating func arrangeGroup(containing target: UUID, axis: PaneAxis) -> Bool {
+        switch content {
+        case .group(let group):
+            guard group.contains(target), group.count > 1 else { return false }
+            let fraction = 1 / CGFloat(group.count)
+            content = .split(
+                axis: axis,
+                children: group.sessionIDs.map {
+                    Child(node: .terminal($0), fraction: fraction)
+                }
+            )
+            return true
+
+        case .split(let currentAxis, var children):
+            guard let index = children.firstIndex(where: { $0.node.contains(sessionID: target) }) else {
+                return false
+            }
+
+            if currentAxis == axis,
+               let group = children[index].node.group,
+               group.count > 1 {
+                let fraction = children[index].fraction / CGFloat(group.count)
+                let arranged = group.sessionIDs.map {
+                    Child(node: .terminal($0), fraction: fraction)
+                }
+                children.replaceSubrange(index...index, with: arranged)
+                content = .split(axis: currentAxis, children: children)
+                return true
+            }
+
+            guard children[index].node.arrangeGroup(containing: target, axis: axis) else { return false }
+            content = .split(axis: currentAxis, children: children)
+            return true
+        }
+    }
+
     // MARK: - 会话组：并入 / 切换
 
     /// 把一个会话放进「包含 `target` 的那个分栏」的会话组里，落在小标签条的第 `index` 位。
@@ -448,6 +548,35 @@ public struct PaneNode: Identifiable, Equatable {
 
         for index in children.indices {
             if children[index].node.setFractions(fractions, forSplit: splitID) {
+                content = .split(axis: axis, children: children)
+                return true
+            }
+        }
+        return false
+    }
+
+    /// 双击某条分隔线时，把它两侧的相邻分栏恢复为各占这对空间的一半。
+    ///
+    /// `dividerIndex` 是分隔线左侧（横排）或上侧（竖排）子节点的下标；同一 split 里
+    /// 其他子节点的占比保持不变。找不到目标 split 或下标越界时返回 `false`。
+    @discardableResult
+    public mutating func equalizeAdjacentChildren(atDivider dividerIndex: Int, forSplit splitID: UUID) -> Bool {
+        guard case .split(let axis, var children) = content else { return false }
+
+        if id == splitID {
+            guard children.indices.contains(dividerIndex),
+                  children.indices.contains(dividerIndex + 1)
+            else { return false }
+
+            let half = (children[dividerIndex].fraction + children[dividerIndex + 1].fraction) / 2
+            children[dividerIndex].fraction = half
+            children[dividerIndex + 1].fraction = half
+            content = .split(axis: axis, children: children)
+            return true
+        }
+
+        for index in children.indices {
+            if children[index].node.equalizeAdjacentChildren(atDivider: dividerIndex, forSplit: splitID) {
                 content = .split(axis: axis, children: children)
                 return true
             }

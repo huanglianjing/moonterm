@@ -13,7 +13,6 @@ struct AppCommands: Commands {
             Button("新建连接…") {
                 appState.revealHosts()
             }
-            .keyboardShortcut("t", modifiers: .command)
         }
 
         CommandGroup(replacing: .appSettings) {
@@ -73,7 +72,7 @@ struct AppCommands: Commands {
             Button("在当前分栏新建窗口") {
                 appState.addWindowToFocusedPane()
             }
-            .keyboardShortcut("t", modifiers: [.command, .option])
+            .keyboardShortcut("t", modifiers: .command)
             .disabled(appState.selectedTab == nil)
 
             Divider()

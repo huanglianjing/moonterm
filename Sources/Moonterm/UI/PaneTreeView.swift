@@ -90,7 +90,11 @@ private struct SplitView: View {
                     onChanged: { translation in
                         resize(dividerIndex: index, translation: translation, available: available)
                     },
-                    onEnded: { resizeBase = nil }
+                    onEnded: { resizeBase = nil },
+                    onDoubleClick: {
+                        resizeBase = nil
+                        appState.centerDivider(at: index, splitID: splitID, tabID: tab.id)
+                    }
                 )
             }
         }
@@ -135,6 +139,7 @@ private struct PaneDivider: View {
     let thickness: CGFloat
     let onChanged: (CGFloat) -> Void
     let onEnded: () -> Void
+    let onDoubleClick: () -> Void
 
     @State private var isHovering = false
 
@@ -162,6 +167,10 @@ private struct PaneDivider: View {
                     }
                     .onEnded { _ in onEnded() }
             )
+            .simultaneousGesture(
+                TapGesture(count: 2).onEnded(onDoubleClick)
+            )
+            .help("拖动调整比例，双击恢复居中")
     }
 }
 
@@ -211,7 +220,7 @@ private struct PaneLeafView: View {
 // MARK: - 分栏标题栏
 
 /// 分栏顶部那条标题栏：每个窗口一个小标签，只占自己名字的宽度；
-/// 右侧的 `+` 在**本分栏**里再叠一个同主机的窗口。
+/// 左侧的 `+` 在**本分栏**里再叠一个同主机的窗口，最右侧的 `…` 一次展开常用布局。
 private struct PaneHeaderBar: View {
 
     @EnvironmentObject private var appState: AppState
@@ -222,6 +231,8 @@ private struct PaneHeaderBar: View {
 
     /// 各标签的矩形，供拖拽落点判定用（子视图上报，本视图汇总后再往上报）。
     @State private var chips: [DragController.Chip] = []
+    /// `Menu` 拿不到自定义按钮样式里的悬停状态，只能在外面自己记。
+    @State private var isLayoutMenuHovering = false
 
     /// 这条栏的高度，同时也是那个 `+` 方块的边长。比 tab 条略矮 ——
     /// 它是分栏内部的东西，压满和 tab 条一样高会跟 tab 抢层级。
@@ -252,6 +263,39 @@ private struct PaneHeaderBar: View {
             .help("在这个分栏新建窗口（\(tab.title)）")
 
             Spacer(minLength: 0)
+
+            Menu {
+                Button("左右排列", systemImage: "rectangle.split.2x1") {
+                    appState.arrangeWindows(inPaneOf: group.activeID, axis: .horizontal)
+                }
+                .disabled(group.sessionIDs.count < 2)
+
+                Button("上下排列", systemImage: "rectangle.split.1x2") {
+                    appState.arrangeWindows(inPaneOf: group.activeID, axis: .vertical)
+                }
+                .disabled(group.sessionIDs.count < 2)
+
+                Divider()
+
+                Button("左右分栏", systemImage: "rectangle.split.2x1") {
+                    appState.split(from: group.activeID, preset: .sideBySide)
+                }
+                Button("上下分栏", systemImage: "rectangle.split.1x2") {
+                    appState.split(from: group.activeID, preset: .stacked)
+                }
+                Button("四宫格分栏", systemImage: "square.grid.2x2") {
+                    appState.split(from: group.activeID, preset: .grid)
+                }
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 9, weight: .bold))
+                    .chromeIconCell(side: Self.height, hovering: isLayoutMenuHovering)
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .frame(width: Self.height, height: Self.height)
+            .onHover { isLayoutMenuHovering = $0 }
+            .help("分栏布局")
         }
         .padding(.horizontal, 3)
         .frame(height: Self.height)

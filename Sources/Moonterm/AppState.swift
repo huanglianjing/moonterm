@@ -143,6 +143,41 @@ final class AppState: ObservableObject {
         selectedTabID = tabs[index].id
     }
 
+    /// 从某个分栏一次展开标题栏菜单指定的布局。新位置各自创建独立 SSH 窗口，
+    /// 当前分栏里原本叠放的窗口组保持不动。
+    func split(from target: UUID, preset: PaneSplitPreset) {
+        guard let index = tabs.firstIndex(where: { $0.contains(sessionID: target) }) else { return }
+
+        let created = (0..<preset.newSessionCount).map { _ in
+            makeSession(host: tabs[index].host)
+        }
+        let sessionIDs = created.map(\.id)
+        guard tabs[index].root.split(
+            relativeTo: target,
+            preset: preset,
+            newSessionIDs: sessionIDs
+        ) else {
+            sessionIDs.forEach(destroySession)
+            return
+        }
+
+        sessionIDs.forEach { tabs[index].assignWindowNumber(to: $0) }
+        if let focused = sessionIDs.last {
+            tabs[index].focusedSessionID = focused
+        }
+        selectedTabID = tabs[index].id
+    }
+
+    /// 把一个分栏里叠放的现有窗口全部展开，不创建或销毁 SSH 会话。
+    func arrangeWindows(inPaneOf anchor: UUID, axis: PaneAxis) {
+        guard let index = tabs.firstIndex(where: { $0.contains(sessionID: anchor) }),
+              tabs[index].root.arrangeGroup(containing: anchor, axis: axis)
+        else { return }
+
+        tabs[index].focusedSessionID = anchor
+        selectedTabID = tabs[index].id
+    }
+
     /// 在某个分栏里叠放一个新窗口（分栏标题栏上的 + 号）。同样用本 tab 的主机。
     func addWindow(toPaneOf anchor: UUID) {
         guard let index = tabs.firstIndex(where: { $0.contains(sessionID: anchor) }) else { return }
@@ -227,6 +262,12 @@ final class AppState: ObservableObject {
     func setFractions(_ fractions: [CGFloat], splitID: UUID, tabID: UUID) {
         guard let index = tabs.firstIndex(where: { $0.id == tabID }) else { return }
         tabs[index].root.setFractions(fractions, forSplit: splitID)
+    }
+
+    /// 双击分隔线：只把它相邻的两个分栏均分，别的分栏占比不动。
+    func centerDivider(at index: Int, splitID: UUID, tabID: UUID) {
+        guard let tabIndex = tabs.firstIndex(where: { $0.id == tabID }) else { return }
+        tabs[tabIndex].root.equalizeAdjacentChildren(atDivider: index, forSplit: splitID)
     }
 
     // MARK: - 关闭
@@ -523,7 +564,7 @@ final class AppState: ObservableObject {
         activeSidebar = activeSidebar == panel ? nil : panel
     }
 
-    /// 需要选主机时（⌘T / 关掉最后一个 tab 之后）把主机面板露出来。
+    /// 需要选主机时把主机面板露出来。
     func revealHosts() {
         activeSidebar = .hosts
     }
