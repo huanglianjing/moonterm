@@ -4,6 +4,9 @@ struct ContentView: View {
 
     @EnvironmentObject private var appState: AppState
 
+    /// 主窗口的删除确认弹窗。挂在这一层才盖得住 tab 条和终端；侧栏、文件面板都只是发起方。
+    @StateObject private var confirmations = ConfirmationCenter()
+
     var body: some View {
         // 左边两条竖的（常驻竖栏 + 展开的面板）都占布局空间，展开时终端区被挤窄。
         HStack(spacing: 0) {
@@ -21,6 +24,9 @@ struct ContentView: View {
         .frame(minWidth: 760, minHeight: 460)
         // 拖拽提示要能盖住 tab 条和终端区，所以叠在最外层。
         .overlay(DropIndicatorOverlay())
+        .environmentObject(confirmations)
+        // 确认弹窗压在最上面（连拖拽提示也压住），弹着的时候底下什么都点不到。
+        .destructiveConfirmations(confirmations)
         .navigationTitle(appState.windowTitle)
         .sheet(isPresented: $appState.isHostManagerPresented) {
             HostManagerView()

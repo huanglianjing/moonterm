@@ -10,9 +10,11 @@ struct HostManagerView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.dismiss) private var dismiss
 
+    /// 这张 sheet 是独立窗口，主窗口那层确认弹窗盖不到它，所以自己再持一份。
+    @StateObject private var confirmations = ConfirmationCenter()
+
     @State private var selection: UUID?
     @State private var hostBeingEdited: HostConfig?
-    @State private var hostPendingDeletion: HostConfig?
 
     private var hosts: [HostConfig] { appState.configStore.hosts }
 
@@ -54,25 +56,10 @@ struct HostManagerView: View {
             toolbar
         }
         .frame(width: 540, height: 420)
+        .destructiveConfirmations(confirmations)
         .sheet(item: $hostBeingEdited) { host in
             HostEditorView(host: host)
                 .environmentObject(appState)
-        }
-        .alert(
-            "删除「\(hostPendingDeletion?.displayName ?? "")」？",
-            isPresented: Binding(
-                get: { hostPendingDeletion != nil },
-                set: { if !$0 { hostPendingDeletion = nil } }
-            ),
-            presenting: hostPendingDeletion
-        ) { host in
-            Button("删除", role: .destructive) {
-                appState.configStore.remove(id: host.id)
-                if selection == host.id { selection = nil }
-            }
-            Button("取消", role: .cancel) {}
-        } message: { _ in
-            Text("配置和保存的密码都会被删除，此操作不可撤销。")
         }
     }
 
@@ -86,7 +73,7 @@ struct HostManagerView: View {
             .help("新建主机")
 
             Button {
-                hostPendingDeletion = selectedHost
+                requestDeletion(of: selectedHost)
             } label: {
                 Image(systemName: "minus")
             }
@@ -127,6 +114,18 @@ struct HostManagerView: View {
         dismiss()
     }
 
+    private func requestDeletion(of host: HostConfig?) {
+        guard let host else { return }
+
+        confirmations.ask(
+            title: "删除「\(host.displayName)」？",
+            confirmTitle: "删除"
+        ) {
+            appState.configStore.remove(id: host.id)
+            if selection == host.id { selection = nil }
+        }
+    }
+
     private func row(for host: HostConfig) -> some View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
@@ -159,7 +158,7 @@ struct HostManagerView: View {
             Button("编辑…") { hostBeingEdited = host }
             Button("复制") { appState.configStore.duplicate(id: host.id) }
             Divider()
-            Button("删除…") { hostPendingDeletion = host }
+            Button("删除…") { requestDeletion(of: host) }
         }
     }
 }

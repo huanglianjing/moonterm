@@ -41,6 +41,19 @@ enum ChromeStyle {
 
     static let accent = Color(nsColor: .controlAccentColor)
 
+    /// 确认弹窗的卡片底。比面板再亮一档 —— 它浮在所有东西上面，得看出来是「压在上面的一张纸」。
+    static let dialog = Color(red: 0.175, green: 0.180, blue: 0.200)
+
+    /// 弹窗背后压暗整块区域的那一层。压得住「底下现在点不了」，又不至于把内容糊没。
+    static let dialogScrim = Color.black.opacity(0.45)
+
+    /// 破坏性按钮的红。不跟系统强调色 —— 那个可能被用户改成粉或绿，而「这一下会删东西」
+    /// 必须是红的。
+    static let destructive = Color(red: 0.78, green: 0.24, blue: 0.23)
+    static let destructiveHovered = Color(red: 0.86, green: 0.28, blue: 0.26)
+    /// 按下往暗走，和外壳上其它按钮一致（悬停已经占了「变亮」）。
+    static let destructivePressed = Color(red: 0.62, green: 0.18, blue: 0.17)
+
     /// 当前分栏的焦点边框。系统强调色的亮蓝压在纯黑终端上太扎眼，这里用暗一档的蓝，
     /// 能看出「键盘在这一栏」就够了，不抢终端内容的注意力。
     static let focusRing = Color(red: 0.11, green: 0.33, blue: 0.60)

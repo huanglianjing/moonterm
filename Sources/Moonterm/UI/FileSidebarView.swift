@@ -28,6 +28,8 @@ struct FileSidebarView: View {
 private struct FilePanel: View {
 
     @EnvironmentObject private var appState: AppState
+    /// 删除确认弹窗。画在窗口最外层（`ContentView`），这里只负责提问。
+    @EnvironmentObject private var confirmations: ConfirmationCenter
     @ObservedObject var browser: RemoteFileBrowser
     let tab: TerminalTab
 
@@ -35,8 +37,6 @@ private struct FilePanel: View {
     @State private var isOptionsHovering = false
     /// 新建目录与重命名共用一个小输入框；nil 表示没在输入。
     @State private var nameRequest: FileNameRequest?
-    /// 待确认删除的条目。单独使用新版 alert builder，才能显式指定 Enter / Esc 的按钮语义。
-    @State private var deletionConfirmation: RemoteFileEntry?
     @State private var operationError: String?
     /// 本地文件正悬在整棵树上；没有更具体的行落点时，实际上传到当前树根。
     @State private var isRootFileDropTargeted = false
@@ -62,19 +62,6 @@ private struct FilePanel: View {
             }
             .frame(width: 0, height: 0)
         )
-        .background(
-            DeletionConfirmationKeyboardMonitor(
-                isActive: deletionConfirmation != nil,
-                onConfirm: {
-                    guard let entry = deletionConfirmation else { return }
-                    confirmDeletion(entry)
-                },
-                onCancel: {
-                    deletionConfirmation = nil
-                }
-            )
-            .frame(width: 0, height: 0)
-        )
         .sheet(item: $nameRequest) { request in
             FileNameEditor(
                 title: request.title,
@@ -82,20 +69,6 @@ private struct FilePanel: View {
                 actionTitle: request.actionTitle
             ) { name in
                 perform(request, name: name)
-            }
-        }
-        .alert(
-            deletionConfirmation.map { "删除「\($0.name)」？" } ?? "确认删除",
-            isPresented: deletionConfirmationIsPresented,
-            presenting: deletionConfirmation
-        ) { entry in
-            Button("取消", role: .cancel) {
-                deletionConfirmation = nil
-            }
-            .keyboardShortcut(.cancelAction)
-
-            Button("删除", role: .destructive) {
-                confirmDeletion(entry)
             }
         }
         .alert("文件操作失败", isPresented: operationErrorIsPresented) {
@@ -358,27 +331,25 @@ private struct FilePanel: View {
     }
 
     private func requestSelectionDeletion() {
-        guard deletionConfirmation == nil,
+        guard !confirmations.isPresenting,
               operationError == nil,
               !browser.isMutating,
               let selection = browser.selection,
               let entry = browser.entry(at: selection)
         else { return }
-        deletionConfirmation = entry
+        requestDeletion(of: entry)
     }
 
-    private func confirmDeletion(_ entry: RemoteFileEntry) {
-        deletionConfirmation = nil
-        browser.delete(entry) { error in
-            if let error { operationError = error }
+    /// 目录是递归删的（里面的内容一起删），删掉就找不回来了，所以先问一句。
+    private func requestDeletion(of entry: RemoteFileEntry) {
+        confirmations.ask(
+            title: "删除「\(entry.name)」？",
+            confirmTitle: "删除"
+        ) {
+            browser.delete(entry) { error in
+                if let error { operationError = error }
+            }
         }
-    }
-
-    private var deletionConfirmationIsPresented: Binding<Bool> {
-        Binding(
-            get: { deletionConfirmation != nil },
-            set: { if !$0 { deletionConfirmation = nil } }
-        )
     }
 
     private var operationErrorIsPresented: Binding<Bool> {
@@ -466,7 +437,7 @@ private struct FilePanel: View {
         .disabled(browser.isMutating)
 
         Button("删除…", role: .destructive) {
-            deletionConfirmation = entry
+            requestDeletion(of: entry)
         }
         .disabled(browser.isMutating)
 
@@ -944,84 +915,6 @@ private struct FilePanelKeyboardCatcher: NSViewRepresentable {
                 return
             }
             onDelete?()
-        }
-    }
-}
-
-// MARK: - 删除确认快捷键
-
-/// 给删除确认框保留 Return / Enter 和 Esc，但不把破坏性按钮标成系统默认按钮；后者会让按钮
-/// 在弹框刚出现时显示成蓝色，只有按下后才短暂露出破坏性操作应有的红色。
-private struct DeletionConfirmationKeyboardMonitor: NSViewRepresentable {
-
-    let isActive: Bool
-    let onConfirm: () -> Void
-    let onCancel: () -> Void
-
-    func makeNSView(context: Context) -> MonitorView {
-        let view = MonitorView()
-        update(view)
-        return view
-    }
-
-    func updateNSView(_ nsView: MonitorView, context: Context) {
-        update(nsView)
-    }
-
-    private func update(_ view: MonitorView) {
-        view.isActive = isActive
-        view.onConfirm = onConfirm
-        view.onCancel = onCancel
-    }
-
-    final class MonitorView: NSView {
-
-        var isActive = false
-        var onConfirm: (() -> Void)?
-        var onCancel: (() -> Void)?
-
-        private var monitor: Any?
-
-        override func viewDidMoveToWindow() {
-            super.viewDidMoveToWindow()
-            if window == nil {
-                stopMonitoring()
-            } else {
-                startMonitoring()
-            }
-        }
-
-        private func startMonitoring() {
-            guard monitor == nil else { return }
-            monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-                guard let self, self.isActive else { return event }
-
-                let disallowedModifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
-                guard disallowedModifiers.isEmpty else { return event }
-
-                switch event.keyCode {
-                case 36, 76: // Return、数字键盘 Enter
-                    self.isActive = false
-                    self.onConfirm?()
-                    return nil
-                case 53: // Esc
-                    self.isActive = false
-                    self.onCancel?()
-                    return nil
-                default:
-                    return event
-                }
-            }
-        }
-
-        private func stopMonitoring() {
-            guard let monitor else { return }
-            NSEvent.removeMonitor(monitor)
-            self.monitor = nil
-        }
-
-        deinit {
-            stopMonitoring()
         }
     }
 }

@@ -314,16 +314,10 @@ private struct PaneDivider: View {
             switch phase {
             case .active(let location):
                 isHovering = true
-                if !isDragging {
-                    emphasize(at: location)
-                    cursor(at: location).set()
-                }
+                if !isDragging { engage(at: location) }
             case .ended:
                 isHovering = false
-                if !isDragging {
-                    dividerHighlight.clear(owner: identity)
-                    NSCursor.arrow.set()
-                }
+                if !isDragging { disengage() }
             }
         }
         .gesture(
@@ -332,18 +326,15 @@ private struct PaneDivider: View {
                 .onChanged { value in
                     isDragging = true
                     // 接点图标按起手位置锁定；拖开后不能突然退回单轴图标。
-                    emphasize(at: value.startLocation)
-                    cursor(at: value.startLocation).set()
+                    engage(at: value.startLocation)
                     onChanged(value.startLocation, value.translation)
                 }
                 .onEnded { value in
                     isDragging = false
                     if isHovering {
-                        emphasize(at: value.location)
-                        cursor(at: value.location).set()
+                        engage(at: value.location)
                     } else {
-                        dividerHighlight.clear(owner: identity)
-                        NSCursor.arrow.set()
+                        disengage()
                     }
                     onEnded()
                 }
@@ -352,9 +343,18 @@ private struct PaneDivider: View {
             TapGesture(count: 2).onEnded(onDoubleClick)
         )
         .help("拖动调整比例，双击恢复居中")
-        .onDisappear {
-            dividerHighlight.clear(owner: identity)
-        }
+        .onDisappear(perform: disengage)
+    }
+
+    /// 高亮和鼠标图标始终一起变：两者都由同一次接点判定决定，不能各算一遍。
+    private func engage(at point: CGPoint) {
+        emphasize(at: point)
+        PaneDividerCursorGuard.take(cursor(at: point), owner: identity)
+    }
+
+    private func disengage() {
+        dividerHighlight.clear(owner: identity)
+        PaneDividerCursorGuard.release(owner: identity)
     }
 
     /// 普通位置只高亮当前线；T / 十字接点高亮本次实际会一起移动的完整分隔线组。

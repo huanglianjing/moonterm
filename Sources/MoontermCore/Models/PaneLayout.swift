@@ -51,6 +51,12 @@ public enum PaneDividerJunction {
     /// 接点允许的最大视觉间隔。SwiftUI 的布局坐标以点计，这里按界面里的 5 像素语义处理。
     public static let tolerance: CGFloat = 5
 
+    /// 一个接点：交点坐标，加上要一起移动的整组分隔线（含主动线）。
+    struct Junction {
+        let point: CGPoint
+        let dividers: [PaneDividerGeometry]
+    }
+
     /// 返回接点附近需要一起移动的整组分隔线；只有横、竖两个方向都出现时才算有效接点。
     ///
     /// 返回整组而不只是最近的一条：树形布局中的十字通常由一条竖线和左右两条横线组成，
@@ -64,23 +70,61 @@ public enum PaneDividerJunction {
         tolerance: CGFloat = PaneDividerJunction.tolerance,
         sourceHitOutset: CGFloat = PaneDividerJunction.tolerance
     ) -> [PaneDividerGeometry] {
+        junction(
+            dragging: splitID,
+            dividerIndex: dividerIndex,
+            at: point,
+            among: dividers,
+            tolerance: tolerance,
+            sourceHitOutset: sourceHitOutset
+        )?.dividers ?? []
+    }
+
+    /// 判定鼠标是不是停在一个接点上，并把整组线圈出来。
+    ///
+    /// 鼠标只负责回答「在不在接点上」（同时落在相交两条线各自的热区里），
+    /// **组员一律以交点为原点判定，不看鼠标**。反过来按鼠标到各条线的距离收组的话，
+    /// 热区有十几点宽，鼠标在里面挪两三点就能让十字对面那条线掉出组 ——
+    /// 高亮会只剩一条、图标也在单轴 / T / 十字之间来回跳，就是这么来的。
+    static func junction(
+        dragging splitID: UUID,
+        dividerIndex: Int,
+        at point: CGPoint,
+        among dividers: [PaneDividerGeometry],
+        tolerance: CGFloat = PaneDividerJunction.tolerance,
+        sourceHitOutset: CGFloat = PaneDividerJunction.tolerance
+    ) -> Junction? {
         guard tolerance >= 0, sourceHitOutset >= 0,
               let source = dividers.first(where: {
                   $0.splitID == splitID && $0.dividerIndex == dividerIndex
               }),
               distance(from: point, to: source.frame) <= sourceHitOutset
-        else { return [] }
+        else { return nil }
 
-        // 起点可能落在 2 点宽分隔线的另一侧：两条线本身相隔 5 点时，起点到另一条线
+        // 鼠标可能停在 2 点宽主动线的另一侧：两条线本身相隔 5 点时，鼠标到另一条线
         // 最远会是 7 点。把主动线的短边算进去，判定的才是「线与线间隔」而不是鼠标到线的距离。
         let sourceThickness = min(source.frame.width, source.frame.height)
-        let reach = tolerance + sourceThickness
-        let nearby = dividers.filter {
+        let reach = sourceHitOutset + sourceThickness
+
+        // 交点位置由两条线自己给：竖线定 x，横线定 y。
+        guard let partner = dividers
+            .filter({
+                $0.splitAxis != source.splitAxis
+                    && distance(between: source.frame, and: $0.frame) <= tolerance
+                    && distance(from: point, to: $0.frame) <= reach
+            })
+            .min(by: { distance(from: point, to: $0.frame) < distance(from: point, to: $1.frame) })
+        else { return nil }
+
+        let vertical = source.splitAxis == .horizontal ? source : partner
+        let horizontal = source.splitAxis == .horizontal ? partner : source
+        let crossing = CGPoint(x: vertical.frame.midX, y: horizontal.frame.midY)
+
+        let group = dividers.filter {
             distance(between: source.frame, and: $0.frame) <= tolerance
-                && distance(from: point, to: $0.frame) <= reach
+                && distance(from: crossing, to: $0.frame) <= reach
         }
-        guard nearby.contains(where: { $0.splitAxis != source.splitAxis }) else { return [] }
-        return nearby
+        return Junction(point: crossing, dividers: group)
     }
 
     /// 返回鼠标当前位置应显示的调整光标形状；找不到主动线时返回 nil。
@@ -100,31 +144,32 @@ public enum PaneDividerJunction {
               distance(from: point, to: source.frame) <= sourceHitOutset
         else { return nil }
 
-        let linked = linkedDividers(
+        guard let junction = junction(
             dragging: splitID,
             dividerIndex: dividerIndex,
             at: point,
             among: dividers,
             tolerance: tolerance,
             sourceHitOutset: sourceHitOutset
-        )
-        guard !linked.isEmpty else {
+        ) else {
             return source.splitAxis == .horizontal ? .leftRight : .upDown
         }
 
-        // 分栏最短边远大于容差；超过接点 5 点仍有线段，就代表那个方向确实有一条“腿”。
+        // 腿也要从**交点**量，不能拿鼠标当原点：热区向两侧各伸出好几点，鼠标压在偏外侧
+        // 那一两点上时，交点对面的那条线会被算成一条腿，T 形就在那儿误报成十字。
+        // 分栏最短边远大于容差；超过交点 5 点仍有线段，就代表那个方向确实有一条“腿”。
         var hasLeft = false
         var hasRight = false
         var hasTop = false
         var hasBottom = false
-        for divider in linked {
+        for divider in junction.dividers {
             switch divider.splitAxis {
             case .horizontal:
-                hasTop = hasTop || divider.frame.minY < point.y - tolerance
-                hasBottom = hasBottom || divider.frame.maxY > point.y + tolerance
+                hasTop = hasTop || divider.frame.minY < junction.point.y - tolerance
+                hasBottom = hasBottom || divider.frame.maxY > junction.point.y + tolerance
             case .vertical:
-                hasLeft = hasLeft || divider.frame.minX < point.x - tolerance
-                hasRight = hasRight || divider.frame.maxX > point.x + tolerance
+                hasLeft = hasLeft || divider.frame.minX < junction.point.x - tolerance
+                hasRight = hasRight || divider.frame.maxX > junction.point.x + tolerance
             }
         }
 
@@ -159,7 +204,10 @@ public enum PaneDividerJunction {
 public enum PaneDividerMagnet {
 
     /// 鼠标目标进入这个距离后吸附；超过后立即恢复自由拖动。
-    public static let tolerance: CGFloat = 6
+    ///
+    /// 取 12 点：比分隔线的拖动热区（半边 6 点）宽一倍，手推过去时能明显感到被拉住；
+    /// 相对分栏最短边 120 点又只占十分之一，不至于粘手。要再灵敏就只改这一个数。
+    public static let tolerance: CGFloat = 18
 
     /// 返回吸附后的起手位移。没有同向候选或尚未进入阈值时原样返回 `translation`。
     public static func snappedTranslation(

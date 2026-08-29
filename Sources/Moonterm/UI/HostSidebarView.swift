@@ -12,17 +12,17 @@ import SwiftUI
 struct HostSidebarView: View {
 
     @EnvironmentObject private var appState: AppState
+    /// 删除确认弹窗。画在窗口最外层（`ContentView`），这里只负责提问。
+    @EnvironmentObject private var confirmations: ConfirmationCenter
     /// 拖拽状态。只有这个面板用，所以就挂在这儿，不进 `AppState`。
     @StateObject private var drag = HostDragController()
 
     /// 选中的主机。选择那套语义（重选 / 加减 / 扩选）是 `MoontermCore` 里的纯逻辑，有单测。
     @State private var selection = HostSelection()
-    /// 待确认删除的主机，可能是一批。空 = 没在删。删主机会连密码一起删，不能点一下就没了。
-    @State private var hostsPendingDeletion: [HostConfig] = []
-    /// 待确认删除的分组。里面的主机不会跟着删，只是移到未分组。
-    @State private var groupPendingDeletion: HostGroup?
     /// 正在就地改名的分组。新建分组后立刻进这个状态 —— 新建和改名是同一条路。
     @State private var groupBeingRenamed: UUID?
+    /// 草稿放在面板这一层，空白点击即使被 AppKit 命中层接走，也能直接提交而不必等输入框失焦。
+    @State private var groupNameDraft = ""
     /// 鼠标在标题栏那个 `+` 上。`Menu` 自己不给悬停状态，只能自己接。
     @State private var isPlusHovering = false
     /// 每点一次主机行就递增；AppKit 接收层据此拿回焦点，让删除键作用于当前主机选区。
@@ -52,46 +52,12 @@ struct HostSidebarView: View {
             .frame(width: 0, height: 0)
         )
         // 只监听、不命中：终端、tab 条或别的区域仍收到原点击，同时主机选区立刻收起。
-        .background(HostPanelSelectionBoundary { selection.clear() })
-        .alert(
-            deletionTitle,
-            isPresented: Binding(
-                get: { !hostsPendingDeletion.isEmpty },
-                set: { if !$0 { hostsPendingDeletion = [] } }
-            ),
-            presenting: hostsPendingDeletion
-        ) { targets in
-            Button("删除", role: .destructive) {
-                targets.forEach { store.remove(id: $0.id) }
-                selection.remove(targets.map { $0.id })
+        .background(
+            HostPanelSelectionBoundary {
+                selection.clear()
+                commitGroupRename()
             }
-            Button("取消", role: .cancel) {}
-        }
-        .alert(
-            "删除分组「\(groupPendingDeletion?.displayName ?? "")」？",
-            isPresented: Binding(
-                get: { groupPendingDeletion != nil },
-                set: { if !$0 { groupPendingDeletion = nil } }
-            ),
-            presenting: groupPendingDeletion
-        ) { group in
-            Button("删除分组", role: .destructive) {
-                store.removeGroup(id: group.id)
-            }
-            Button("取消", role: .cancel) {}
-        } message: { group in
-            let count = store.hosts(inGroup: group.id).count
-            Text(count == 0
-                 ? "分组是空的，删掉不影响任何主机。"
-                 : "里面的 \(count) 台主机不会被删除，会移到「未分组」的最下面。")
-        }
-    }
-
-    private var deletionTitle: String {
-        if hostsPendingDeletion.count > 1 {
-            return "删除选中的 \(hostsPendingDeletion.count) 台主机？"
-        }
-        return "删除「\(hostsPendingDeletion.first?.displayName ?? "")」？"
+        )
     }
 
     // MARK: - 行
@@ -157,7 +123,12 @@ struct HostSidebarView: View {
         }
         .padding(.horizontal, 8)
         .frame(height: 28)
-        .simultaneousGesture(TapGesture().onEnded { selection.clear() })
+        .simultaneousGesture(
+            TapGesture().onEnded {
+                selection.clear()
+                commitGroupRename()
+            }
+        )
     }
 
     private var empty: some View {
@@ -194,7 +165,10 @@ struct HostSidebarView: View {
                     Color.clear
                         .frame(minHeight: 8)
                         .frame(maxHeight: .infinity)
-                        .onLeftClick { _, _ in selection.clear() }
+                        .onLeftClick { _, _ in
+                            selection.clear()
+                            commitGroupRename()
+                        }
                 }
                 .padding(.horizontal, 4)
                 .padding(.vertical, 4)
@@ -232,7 +206,8 @@ struct HostSidebarView: View {
                     store.renameGroup(id: group.id, to: name)
                     groupBeingRenamed = nil
                 },
-                onCancelRename: { groupBeingRenamed = nil }
+                onCancelRename: { groupBeingRenamed = nil },
+                nameDraft: $groupNameDraft
             )
             .contextMenu { menu(for: group) }
 
@@ -338,22 +313,56 @@ struct HostSidebarView: View {
     }
 
     private func addGroup() {
+        commitGroupRename()
         let group = store.addGroup()
         // 新建完直接进改名状态：省掉「先建再改」两步，也不用为它单开一个弹窗。
+        beginRenaming(group)
+    }
+
+    private func beginRenaming(_ group: HostGroup) {
+        commitGroupRename()
+        groupNameDraft = group.name
         groupBeingRenamed = group.id
     }
 
+    private func commitGroupRename() {
+        guard let groupBeingRenamed else { return }
+        store.renameGroup(id: groupBeingRenamed, to: groupNameDraft)
+        self.groupBeingRenamed = nil
+    }
+
     private func requestSelectionDeletion() {
-        guard hostsPendingDeletion.isEmpty,
-              groupPendingDeletion == nil,
-              groupBeingRenamed == nil
-        else { return }
+        guard !confirmations.isPresenting, groupBeingRenamed == nil else { return }
 
         let targets = store.displayOrderedHostIDs
             .filter { selection.contains($0) }
             .compactMap { store.host(id: $0) }
+        requestDeletion(of: targets)
+    }
+
+    /// 删主机会连保存的密码一起删，所以先问一句。可能是一批。
+    private func requestDeletion(of targets: [HostConfig]) {
         guard !targets.isEmpty else { return }
-        hostsPendingDeletion = targets
+
+        confirmations.ask(
+            title: targets.count > 1
+                ? "删除选中的 \(targets.count) 台主机？"
+                : "删除「\(targets[0].displayName)」？",
+            confirmTitle: "删除"
+        ) {
+            targets.forEach { store.remove(id: $0.id) }
+            selection.remove(targets.map { $0.id })
+        }
+    }
+
+    /// 删分组不动里面的主机，只是把它们移到未分组。
+    private func requestDeletion(of group: HostGroup) {
+        confirmations.ask(
+            title: "删除分组「\(group.displayName)」？",
+            confirmTitle: "删除分组"
+        ) {
+            store.removeGroup(id: group.id)
+        }
     }
 
     /// `⌘D` 和右键菜单里的「复制」保持同一边界：多选时不猜该复制哪台。
@@ -373,7 +382,7 @@ struct HostSidebarView: View {
             Divider()
             moveMenu(for: targets)
             Divider()
-            Button("删除选中的 \(targets.count) 台…") { hostsPendingDeletion = targets }
+            Button("删除选中的 \(targets.count) 台…") { requestDeletion(of: targets) }
         } else {
             Button("连接") { connect(targets) }
             Button("编辑…") { appState.beginEditing(host: host) }
@@ -381,7 +390,7 @@ struct HostSidebarView: View {
             Divider()
             moveMenu(for: targets)
             Divider()
-            Button("删除…") { hostsPendingDeletion = targets }
+            Button("删除…") { requestDeletion(of: targets) }
         }
     }
 
@@ -427,9 +436,9 @@ struct HostSidebarView: View {
         Button(group.isCollapsed ? "展开" : "折叠") {
             store.setGroup(id: group.id, collapsed: !group.isCollapsed)
         }
-        Button("重命名") { groupBeingRenamed = group.id }
+        Button("重命名") { beginRenaming(group) }
         Divider()
-        Button("删除分组…") { groupPendingDeletion = group }
+        Button("删除分组…") { requestDeletion(of: group) }
     }
 
     private func menuTargets(for host: HostConfig) -> [HostConfig] {
@@ -626,6 +635,7 @@ private struct HostGroupHeaderRow: View {
     let onDrag: (LeftDragPhase) -> Void
     let onRename: (String) -> Void
     let onCancelRename: () -> Void
+    @Binding var nameDraft: String
 
     @State private var isHovering = false
 
@@ -650,7 +660,7 @@ private struct HostGroupHeaderRow: View {
             HStack(spacing: 4) {
                 chevron
                 HostGroupNameField(
-                    initialName: group.name,
+                    draft: $nameDraft,
                     onCommit: onRename,
                     onCancel: onCancelRename
                 )
@@ -704,11 +714,10 @@ private struct HostSectionHeaderRow: View {
 /// 分组就地改名：回车或点别处确认，Esc 放弃，清空则退回默认名。
 private struct HostGroupNameField: View {
 
-    let initialName: String
+    @Binding var draft: String
     let onCommit: (String) -> Void
     let onCancel: () -> Void
 
-    @State private var draft = ""
     /// 提交与放弃都只能发生一次：Esc 之后输入框会失焦，别再把草稿又提交一遍。
     @State private var isSettled = false
     @FocusState private var isFocused: Bool
@@ -729,7 +738,6 @@ private struct HostGroupNameField: View {
                     .strokeBorder(ChromeStyle.accent, lineWidth: 1)
             )
             .onAppear {
-                draft = initialName
                 isFocused = true
             }
             .onSubmit { settle { onCommit(draft) } }

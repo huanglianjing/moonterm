@@ -728,6 +728,144 @@ final class PaneLayoutTests: XCTestCase {
         ).isEmpty)
     }
 
+    /// 高亮的整组不能随鼠标在热区里的位置增减：否则同一个接点上会时而三条线亮、时而一条。
+    func testDividerJunctionGroupIsStableAcrossTheWholeHitZone() {
+        let verticalID = UUID()
+        let leftID = UUID()
+        let rightID = UUID()
+        let dividers = [
+            PaneDividerGeometry(
+                splitID: verticalID,
+                dividerIndex: 0,
+                splitAxis: .horizontal,
+                frame: CGRect(x: 99, y: 0, width: 2, height: 200)
+            ),
+            PaneDividerGeometry(
+                splitID: leftID,
+                dividerIndex: 0,
+                splitAxis: .vertical,
+                frame: CGRect(x: 0, y: 99, width: 99, height: 2)
+            ),
+            PaneDividerGeometry(
+                splitID: rightID,
+                dividerIndex: 0,
+                splitAxis: .vertical,
+                frame: CGRect(x: 101, y: 99, width: 99, height: 2)
+            )
+        ]
+        let whole = Set([verticalID, leftID, rightID])
+
+        // 竖线热区：左右各 6 点。
+        for x in [93, 96, 100, 104, 107] {
+            XCTAssertEqual(Set(PaneDividerJunction.linkedDividers(
+                dragging: verticalID,
+                dividerIndex: 0,
+                at: CGPoint(x: CGFloat(x), y: 100),
+                among: dividers,
+                sourceHitOutset: 6
+            ).map(\.splitID)), whole, "竖线上 x=\(x) 处应锁住整个十字")
+        }
+
+        // 横线热区：上下各 6 点。
+        for y in [93, 96, 100, 104, 107] {
+            XCTAssertEqual(Set(PaneDividerJunction.linkedDividers(
+                dragging: leftID,
+                dividerIndex: 0,
+                at: CGPoint(x: 96, y: CGFloat(y)),
+                among: dividers,
+                sourceHitOutset: 6
+            ).map(\.splitID)), whole, "左横线上 y=\(y) 处应锁住整个十字")
+        }
+    }
+
+    /// 热区伸出的那几点不能被当成“接点在鼠标处”：T 形在热区最外侧也还是 T 形。
+    func testDividerDragShapeKeepsTeeAcrossTheWholeHitZone() {
+        let verticalID = UUID()
+        let branchID = UUID()
+        let dividers = [
+            PaneDividerGeometry(
+                splitID: verticalID,
+                dividerIndex: 0,
+                splitAxis: .horizontal,
+                frame: CGRect(x: 99, y: 0, width: 2, height: 200)
+            ),
+            PaneDividerGeometry(
+                splitID: branchID,
+                dividerIndex: 0,
+                splitAxis: .vertical,
+                frame: CGRect(x: 101, y: 99, width: 100, height: 2)
+            )
+        ]
+
+        // 竖线一侧：贴着热区外沿（右侧 6 点）时，右边那条横线不能被算出一条“左腿”。
+        for x in [93, 96, 100, 104, 107] {
+            XCTAssertEqual(PaneDividerJunction.dragShape(
+                dragging: verticalID,
+                dividerIndex: 0,
+                at: CGPoint(x: CGFloat(x), y: 100),
+                among: dividers,
+                sourceHitOutset: 6
+            ), .teeLeft, "竖线上 x=\(x) 处应仍是 ├")
+        }
+
+        // 横线一侧：沿着横线离开接点时同样不该冒出左腿。
+        for x in [102, 104, 106, 108] {
+            XCTAssertEqual(PaneDividerJunction.dragShape(
+                dragging: branchID,
+                dividerIndex: 0,
+                at: CGPoint(x: CGFloat(x), y: 100),
+                among: dividers,
+                sourceHitOutset: 6
+            ), .teeLeft, "横线上 x=\(x) 处应仍是 ├")
+        }
+    }
+
+    /// 十字接点里，鼠标偏到任一侧都不该退化成 T 形。
+    func testDividerDragShapeKeepsCrossAcrossTheWholeHitZone() {
+        let verticalID = UUID()
+        let leftID = UUID()
+        let rightID = UUID()
+        let dividers = [
+            PaneDividerGeometry(
+                splitID: verticalID,
+                dividerIndex: 0,
+                splitAxis: .horizontal,
+                frame: CGRect(x: 99, y: 0, width: 2, height: 200)
+            ),
+            PaneDividerGeometry(
+                splitID: leftID,
+                dividerIndex: 0,
+                splitAxis: .vertical,
+                frame: CGRect(x: 0, y: 99, width: 99, height: 2)
+            ),
+            PaneDividerGeometry(
+                splitID: rightID,
+                dividerIndex: 0,
+                splitAxis: .vertical,
+                frame: CGRect(x: 101, y: 99, width: 99, height: 2)
+            )
+        ]
+
+        for x in [93, 100, 107] {
+            XCTAssertEqual(PaneDividerJunction.dragShape(
+                dragging: verticalID,
+                dividerIndex: 0,
+                at: CGPoint(x: CGFloat(x), y: 100),
+                among: dividers,
+                sourceHitOutset: 6
+            ), .cross, "竖线上 x=\(x) 处应仍是 ┼")
+        }
+        for y in [94, 100, 106] {
+            XCTAssertEqual(PaneDividerJunction.dragShape(
+                dragging: leftID,
+                dividerIndex: 0,
+                at: CGPoint(x: 95, y: CGFloat(y)),
+                among: dividers,
+                sourceHitOutset: 6
+            ), .cross, "左横线上 y=\(y) 处应仍是 ┼")
+        }
+    }
+
     func testDividerDragShapeUsesExpandedSourceHitOutset() {
         let verticalID = UUID()
         let horizontalID = UUID()
@@ -778,16 +916,20 @@ final class PaneLayoutTests: XCTestCase {
             frame: CGRect(x: 149, y: 102, width: 2, height: 100)
         )
 
+        // 两条线中心相距 50 点：位移差得刚好等于容差时要吸过去，多差 1 点就自由拖动。
+        // 用容差本身表达而不写死数字 —— 这个值是可调的手感参数，要钉住的是边界规则。
+        let gap: CGFloat = 50
+        let tolerance = PaneDividerMagnet.tolerance
         XCTAssertEqual(PaneDividerMagnet.snappedTranslation(
             dragging: source,
-            translation: 44,
+            translation: gap - tolerance,
             among: [source, lower]
-        ), 50)
+        ), gap)
         XCTAssertEqual(PaneDividerMagnet.snappedTranslation(
             dragging: source,
-            translation: 43,
+            translation: gap - tolerance - 1,
             among: [source, lower]
-        ), 43)
+        ), gap - tolerance - 1)
     }
 
     func testDividerMagnetSnapsHorizontalLinesAndIgnoresPerpendicularOnes() {
