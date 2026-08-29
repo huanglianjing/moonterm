@@ -3,6 +3,32 @@ import XCTest
 
 final class RemoteFileMutationValidatorTests: XCTestCase {
 
+    func testUploadConflictsDetectEveryEntryKindInLocalOrder() {
+        let entries = [
+            entry("folder", kind: .directory),
+            entry("file.txt", kind: .file),
+            entry("link", kind: .symlink)
+        ]
+
+        XCTAssertEqual(
+            RemoteFileMutationValidator.existingUploadDestinations(
+                ["/work/file.txt", "/work/new.txt", "/work/folder", "/work/link"],
+                in: entries
+            ),
+            ["/work/file.txt", "/work/folder", "/work/link"]
+        )
+    }
+
+    func testUploadConflictsNormalizeAndDeduplicatePaths() {
+        XCTAssertEqual(
+            RemoteFileMutationValidator.existingUploadDestinations(
+                ["/work//file.txt", "/work/file.txt/", "/work/File.txt"],
+                in: [entry("file.txt", kind: .file)]
+            ),
+            ["/work/file.txt"]
+        )
+    }
+
     func testRenameDestinationDetectsEveryEntryKind() {
         let entries = [
             entry("folder", kind: .directory),

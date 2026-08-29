@@ -55,6 +55,13 @@ final class RemoteFileBrowser: ObservableObject {
         }
     }
 
+    /// 上传前真实列一次目标目录的结果。只有 `.ready` 和用户确认过 `.conflicts` 后才能入传输队列。
+    enum UploadPreflightResult {
+        case ready
+        case conflicts([String])
+        case failed(String)
+    }
+
     /// 同时最多传几个。sftp 一个进程一个文件，开太多只是把带宽切碎，还会撞上服务端的
     /// `MaxSessions`（默认 10，多路复用下每个传输占一条 channel）。
     private static let maximumConcurrentTransfers = 2
@@ -76,7 +83,7 @@ final class RemoteFileBrowser: ObservableObject {
     /// 远端家目录，由 sftp 刚连上时的 `pwd` 得到。也用来把标题里的 `~` 展开成真路径。
     @Published private(set) var home: String?
     @Published private(set) var transfers: [Transfer] = []
-    /// 正在执行新建、重命名或删除。一次只跑一个，避免两个目录修改互相覆盖刷新结果。
+    /// 正在执行上传预检、新建、重命名或删除。一次只跑一个，避免目录修改互相覆盖刷新结果。
     @Published private(set) var isMutating = false
 
     /// 连接层面的问题（会话没连上、sftp 起不来），整块面板级的提示。
@@ -101,7 +108,7 @@ final class RemoteFileBrowser: ObservableObject {
     /// 正在跑的列目录调用。**同一时刻只有一个** —— 新的一来就把旧的掐掉，
     /// 因为用户点得快时晚回来的旧结果不该盖住新的。`loading` 也就跟着它整批换。
     private var listingRunner: SFTPRunner?
-    /// 新建、重命名、删除共用的一条串行操作。递归删除会逐步替换 runner，但始终只算一次操作。
+    /// 上传预检、新建、重命名、删除共用的一条串行操作。递归删除会逐步替换 runner，但始终只算一次操作。
     private var mutationRunner: SFTPRunner?
     /// 传输 id → 它的进程，用于取消。
     private var transferRunners: [UUID: SFTPRunner] = [:]
@@ -561,6 +568,47 @@ final class RemoteFileBrowser: ObservableObject {
     }
 
     // MARK: - 传输
+
+    /// 上传前重新列目标目录，不能直接信任文件树缓存：远端内容可能刚被另一条会话改过。
+    func prepareUpload(
+        _ localURLs: [URL],
+        to directory: String,
+        completion: @escaping (UploadPreflightResult) -> Void
+    ) {
+        guard !localURLs.isEmpty else {
+            completion(.ready)
+            return
+        }
+        guard let plan = beginMutation(completion: { error in
+            if let error { completion(.failed(error)) }
+        }) else { return }
+
+        let destinations = localURLs.map { RemotePath.join(directory, $0.lastPathComponent) }
+        runMutationStep(plan: plan, commands: [SFTPCommandBuilder.list(directory: directory)]) { [weak self] outcome in
+            guard let self else { return }
+            self.isMutating = false
+            guard outcome.isSuccess else {
+                completion(.failed("无法检测同名文件：\(self.explain(outcome))"))
+                return
+            }
+            guard let output = outcome.outputs.first ?? nil else {
+                completion(.failed("无法检测同名文件，请刷新后重试。"))
+                return
+            }
+
+            let entries = SFTPListingParser.parse(output, directory: directory)
+            // 预检拿到的是最新目录内容，顺手更新已经显示过的这一层，避免确认框底下仍画着旧列表。
+            if self.children[directory] != nil {
+                self.children[directory] = entries
+                self.errors.removeValue(forKey: directory)
+            }
+            let conflicts = RemoteFileMutationValidator.existingUploadDestinations(
+                destinations,
+                in: entries
+            )
+            completion(conflicts.isEmpty ? .ready : .conflicts(conflicts))
+        }
+    }
 
     /// 上传若干本地文件 / 目录到 `directory`。
     func upload(_ localURLs: [URL], to directory: String) {

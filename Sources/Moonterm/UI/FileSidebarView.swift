@@ -257,7 +257,7 @@ private struct FilePanel: View {
                         onUpload: { localURLs in
                             browser.selection = nil
                             rowDropTargets.clear()
-                            browser.upload(localURLs, to: uploadDestination(for: row.entry))
+                            requestUpload(localURLs, to: uploadDestination(for: row.entry))
                         },
                         onDropTargetChanged: { isTargeted in
                             updateRowDropDestination(
@@ -303,7 +303,7 @@ private struct FilePanel: View {
             .fileDropDestination(isTargeted: $isRootFileDropTargeted) { localURLs in
                 browser.selection = nil
                 rowDropTargets.clear()
-                browser.upload(localURLs, to: browser.rootPath)
+                requestUpload(localURLs, to: browser.rootPath)
             }
             .onChange(of: isRootFileDropTargeted) { isTargeted in
                 if isTargeted { browser.selection = nil }
@@ -348,6 +348,26 @@ private struct FilePanel: View {
         ) {
             browser.delete(entry) { error in
                 if let error { operationError = error }
+            }
+        }
+    }
+
+    /// 工具栏、右键菜单和 Finder 拖放都走同一份预检，避免某个入口绕过覆盖确认。
+    private func requestUpload(_ localURLs: [URL], to directory: String) {
+        guard !localURLs.isEmpty, !confirmations.isPresenting else { return }
+        browser.prepareUpload(localURLs, to: directory) { result in
+            switch result {
+            case .ready:
+                browser.upload(localURLs, to: directory)
+            case .conflicts:
+                confirmations.ask(
+                    title: "文件已存在，是否覆盖？",
+                    confirmTitle: "覆盖"
+                ) {
+                    browser.upload(localURLs, to: directory)
+                }
+            case .failed(let message):
+                operationError = message
             }
         }
     }
@@ -496,7 +516,7 @@ private struct FilePanel: View {
         panel.prompt = "上传"
         panel.message = "上传到 \(target)"
         guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
-        browser.upload(panel.urls, to: target)
+        requestUpload(panel.urls, to: target)
     }
 }
 
