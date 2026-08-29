@@ -19,7 +19,10 @@ struct FileSidebarView: View {
         if let tab = appState.selectedTab {
             FilePanel(browser: appState.fileBrowser(for: tab), tab: tab)
         } else {
-            NoConnectionPanel()
+            SidebarNoConnectionPanel(
+                panel: .files,
+                hint: "在主机面板里双击一台主机，这里会显示它的文件"
+            )
         }
     }
 }
@@ -634,47 +637,6 @@ private struct FileNameEditor: View {
     }
 }
 
-// MARK: - 没有连接时
-
-/// 一个 tab 都没有时的面板。文件树是跟着 tab（主机）走的，没 tab 就没什么可列。
-private struct NoConnectionPanel: View {
-
-    @EnvironmentObject private var appState: AppState
-
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text(SidebarPanel.files.title)
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 8)
-            .frame(height: 28)
-
-            ChromeHairline()
-
-            VStack(spacing: 8) {
-                Text("没有打开的连接")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-
-                Text("在主机面板里双击一台主机，这里会显示它的文件")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
-                    .multilineTextAlignment(.center)
-
-                Button("打开主机面板") { appState.revealHosts() }
-                    .controlSize(.small)
-            }
-            .padding(12)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-        .frame(maxHeight: .infinity)
-        .background(ChromeStyle.sidebar)
-    }
-}
-
 // MARK: - 面包屑的一段
 
 private struct BreadcrumbSegment: View {
@@ -993,8 +955,8 @@ private struct TransferResizeHandle: View {
 
 /// 面板底部那一小块：正在传和刚传完的条目。
 ///
-/// 下载有百分比（拿本地文件当前多大除以远端说它多大算出来的），上传只能显示「传输中」——
-/// sftp 的进度条只在 stdout 是 tty 时才输出，批处理模式下一个字都没有。
+/// 普通文件的下载与上传都有百分比：分别读取本地落地大小与远端目标大小。
+/// 目录无法用单个文件大小表示，仍显示不确定进度。
 private struct TransferList: View {
 
     @ObservedObject var browser: RemoteFileBrowser
@@ -1078,7 +1040,7 @@ private struct TransferRow: View {
             }
 
             if !transfer.isDone {
-                // 有百分比就画确定的条，没有（上传、目录）就画来回跑的那种。
+                // 普通文件有百分比；目录传输画来回跑的不确定进度条。
                 if let fraction = transfer.fraction {
                     ProgressView(value: fraction)
                         .controlSize(.small)

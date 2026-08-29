@@ -49,6 +49,8 @@ struct ContentView: View {
                     HostSidebarView()
                 case .files:
                     FileSidebarView()
+                case .monitor:
+                    MonitorSidebarView()
                 }
             }
             .frame(width: appState.sidebarWidth)

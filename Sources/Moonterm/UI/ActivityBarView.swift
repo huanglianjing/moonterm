@@ -8,6 +8,7 @@ enum SidebarPanel: String, CaseIterable, Identifiable {
 
     case hosts
     case files
+    case monitor
 
     var id: String { rawValue }
 
@@ -15,6 +16,7 @@ enum SidebarPanel: String, CaseIterable, Identifiable {
         switch self {
         case .hosts: return "主机"
         case .files: return "文件"
+        case .monitor: return "监控"
         }
     }
 
@@ -22,6 +24,7 @@ enum SidebarPanel: String, CaseIterable, Identifiable {
         switch self {
         case .hosts: return "server.rack"
         case .files: return "folder"
+        case .monitor: return "waveform.path.ecg"
         }
     }
 
@@ -29,6 +32,7 @@ enum SidebarPanel: String, CaseIterable, Identifiable {
         switch self {
         case .hosts: return "管理主机（⌘B 开关）"
         case .files: return "浏览当前主机的文件（⇧⌘B 开关）"
+        case .monitor: return "查看当前主机的资源占用（⌥⌘B 开关）"
         }
     }
 }

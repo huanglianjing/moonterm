@@ -82,6 +82,22 @@ final class SFTPRunnerLocalTests: XCTestCase {
         XCTAssertEqual(entries.first?.kind, .directory)
     }
 
+    /// 普通文件上传的百分比靠列远端目标文件取得当前大小，验证文件路径也能直接交给 `ls -lan`。
+    func testListsSingleFileForUploadProgress() throws {
+        try write("uploading", to: "target file.txt")
+        let target = directory.appendingPathComponent("target file.txt")
+
+        let outcome = try run([SFTPCommandBuilder.list(directory: target.path)])
+
+        XCTAssertTrue(outcome.isSuccess, outcome.stderr)
+        let entries = SFTPListingParser.parse(
+            try XCTUnwrap(outcome.outputs[0]),
+            directory: directory.path
+        )
+        XCTAssertEqual(entries.map { $0.path }, [target.path])
+        XCTAssertEqual(entries.first?.size, 9)
+    }
+
     /// 一次调用跑多条命令，靠 sftp 的回显行切分 —— 「展开到某个深路径」就是这么干的。
     func testBatchOfSeveralListingsIsFramedCorrectly() throws {
         let nested = directory.appendingPathComponent("a/b")

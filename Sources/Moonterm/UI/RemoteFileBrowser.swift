@@ -34,7 +34,7 @@ final class RemoteFileBrowser: ObservableObject {
         let direction: Direction
         /// 总字节数。下载时来自 `ls` 的结果，上传时来自本地文件；目录传输是 nil（没法预先知道）。
         let totalBytes: UInt64?
-        /// 已传字节数。**只有下载能测**（轮询本地落地文件的大小）；上传是 nil。
+        /// 已传字节数。下载轮询本地落地文件，普通文件上传轮询远端目标文件；目录传输是 nil。
         var bytesDone: UInt64?
         var state: State = .queued
 
@@ -47,8 +47,7 @@ final class RemoteFileBrowser: ObservableObject {
 
         /// 0…1 的进度。测不出来时 nil，界面上画成不确定的样子。
         ///
-        /// sftp 的进度条只在 stdout 是 tty 时才输出（实测：批处理模式下 `progress` 开了也一个字没有），
-        /// 所以下载的百分比是自己算的 —— 拿本地文件当前多大除以远端说它多大。
+        /// sftp 批处理模式没有进度事件，所以两个方向都按已经落地的文件大小自行计算。
         var fraction: Double? {
             guard let totalBytes, totalBytes > 0, let bytesDone else { return nil }
             return min(1, Double(bytesDone) / Double(totalBytes))
@@ -112,8 +111,21 @@ final class RemoteFileBrowser: ObservableObject {
     private var mutationRunner: SFTPRunner?
     /// 传输 id → 它的进程，用于取消。
     private var transferRunners: [UUID: SFTPRunner] = [:]
-    /// 传输 id → 落地文件路径，用于轮询下载进度。
-    private var transferTargets: [UUID: URL] = [:]
+    /// 传输 id → 本地落地文件路径，用于轮询下载进度。
+    private var downloadTargets: [UUID: URL] = [:]
+    /// 普通文件上传的远端进度查询；目录无法用单个文件大小表示，所以不在这里。
+    private struct UploadProgressTarget {
+        let path: String
+        var probe: UploadProgressProbe
+    }
+    private var uploadTargets: [UUID: UploadProgressTarget] = [:]
+    /// 每个上传查询单独一条短命 sftp；查询不存在的文件失败时不能中断其他任务的查询。
+    private var uploadProgressRunners: [UUID: SFTPRunner] = [:]
+    /// 查询远端大小要另开一条复用 channel，限制到每秒一次，不能跟 0.4 秒的本地文件轮询一样频繁。
+    private var lastUploadProgressPoll: [UUID: Date] = [:]
+    /// 最近一次上传预检确认存在的目标及其旧大小，用来识别覆盖上传开始前的旧文件。
+    private var uploadPreflightSizes: [String: UInt64] = [:]
+    private var uploadPreflightChecked: Set<String> = []
     /// 传输 id → 还没起的命令（以及传完要重列哪个目录）。
     private var pendingCommands: [UUID: (command: String, reload: String?)] = [:]
     private var progressTimer: Timer?
@@ -133,6 +145,7 @@ final class RemoteFileBrowser: ObservableObject {
         listingRunner?.cancel()
         mutationRunner?.cancel()
         transferRunners.values.forEach { $0.cancel() }
+        uploadProgressRunners.values.forEach { $0.cancel() }
     }
 
     // MARK: - 绑定会话
@@ -584,6 +597,10 @@ final class RemoteFileBrowser: ObservableObject {
         }) else { return }
 
         let destinations = localURLs.map { RemotePath.join(directory, $0.lastPathComponent) }
+        for destination in destinations {
+            uploadPreflightChecked.remove(destination)
+            uploadPreflightSizes.removeValue(forKey: destination)
+        }
         runMutationStep(plan: plan, commands: [SFTPCommandBuilder.list(directory: directory)]) { [weak self] outcome in
             guard let self else { return }
             self.isMutating = false
@@ -597,6 +614,10 @@ final class RemoteFileBrowser: ObservableObject {
             }
 
             let entries = SFTPListingParser.parse(output, directory: directory)
+            self.uploadPreflightChecked.formUnion(destinations)
+            for entry in entries where destinations.contains(entry.path) {
+                self.uploadPreflightSizes[entry.path] = entry.size
+            }
             // 预检拿到的是最新目录内容，顺手更新已经显示过的这一层，避免确认框底下仍画着旧列表。
             if self.children[directory] != nil {
                 self.children[directory] = entries
@@ -616,6 +637,11 @@ final class RemoteFileBrowser: ObservableObject {
             let isDirectory = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
             let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).flatMap { UInt64($0) }
             let remote = RemotePath.join(directory, url.lastPathComponent)
+            let wasChecked = uploadPreflightChecked.remove(remote) != nil
+            let checkedSize = uploadPreflightSizes.removeValue(forKey: remote)
+            let initialRemoteSize = wasChecked
+                ? checkedSize
+                : children[directory]?.first { $0.path == remote }?.size
 
             enqueue(
                 Transfer(
@@ -624,7 +650,11 @@ final class RemoteFileBrowser: ObservableObject {
                     totalBytes: isDirectory ? nil : size
                 ),
                 command: SFTPCommandBuilder.put(local: url.path, remote: remote, recursive: isDirectory),
-                target: nil,
+                downloadTarget: nil,
+                uploadTarget: isDirectory ? nil : UploadProgressTarget(
+                    path: remote,
+                    probe: UploadProgressProbe(initialRemoteSize: initialRemoteSize)
+                ),
                 // 上传完目标目录的内容变了，列一遍才对得上。
                 reloadOnFinish: directory
             )
@@ -645,7 +675,8 @@ final class RemoteFileBrowser: ObservableObject {
                 local: destination.path,
                 recursive: isDirectory
             ),
-            target: isDirectory ? nil : destination,
+            downloadTarget: isDirectory ? nil : destination,
+            uploadTarget: nil,
             reloadOnFinish: nil
         )
     }
@@ -655,7 +686,8 @@ final class RemoteFileBrowser: ObservableObject {
         // 还在排队（进程都没起）时，直接就地标成失败，顺手把攒着的命令扔掉。
         if let index = transfers.firstIndex(where: { $0.id == transferID }), transfers[index].state == .queued {
             pendingCommands.removeValue(forKey: transferID)
-            transferTargets.removeValue(forKey: transferID)
+            downloadTargets.removeValue(forKey: transferID)
+            uploadTargets.removeValue(forKey: transferID)
             transfers[index].state = .failed("已取消")
             startQueuedTransfers()
         }
@@ -670,9 +702,16 @@ final class RemoteFileBrowser: ObservableObject {
         transfers.contains { $0.isDone }
     }
 
-    private func enqueue(_ transfer: Transfer, command: String, target: URL?, reloadOnFinish: String?) {
+    private func enqueue(
+        _ transfer: Transfer,
+        command: String,
+        downloadTarget: URL?,
+        uploadTarget: UploadProgressTarget?,
+        reloadOnFinish: String?
+    ) {
         transfers.append(transfer)
-        if let target { transferTargets[transfer.id] = target }
+        if let downloadTarget { downloadTargets[transfer.id] = downloadTarget }
+        if let uploadTarget { uploadTargets[transfer.id] = uploadTarget }
         pendingCommands[transfer.id] = (command, reloadOnFinish)
         startQueuedTransfers()
     }
@@ -703,7 +742,10 @@ final class RemoteFileBrowser: ObservableObject {
 
     private func finish(transferID: UUID, outcome: SFTPRunner.Outcome, reload: String?) {
         transferRunners.removeValue(forKey: transferID)
-        transferTargets.removeValue(forKey: transferID)
+        downloadTargets.removeValue(forKey: transferID)
+        uploadTargets.removeValue(forKey: transferID)
+        uploadProgressRunners.removeValue(forKey: transferID)?.cancel()
+        lastUploadProgressPoll.removeValue(forKey: transferID)
 
         if let index = transfers.firstIndex(where: { $0.id == transferID }) {
             if outcome.isSuccess {
@@ -722,14 +764,13 @@ final class RemoteFileBrowser: ObservableObject {
         startQueuedTransfers()
     }
 
-    // MARK: - 下载进度
+    // MARK: - 传输进度
 
-    /// 只在有下载跑着的时候开表。上传测不了进度，光有上传就不用轮询。
+    /// 普通文件的下载和上传都能从落地文件大小推算；递归目录传输仍显示不确定进度。
     private func updateProgressTimer() {
         let needsPolling = transfers.contains { transfer in
             transfer.state == .running
-                && transfer.direction == .download
-                && transferTargets[transfer.id] != nil
+                && (downloadTargets[transfer.id] != nil || uploadTargets[transfer.id] != nil)
         }
 
         if needsPolling, progressTimer == nil {
@@ -744,10 +785,51 @@ final class RemoteFileBrowser: ObservableObject {
 
     private func pollProgress() {
         for index in transfers.indices where transfers[index].state == .running {
-            guard let url = transferTargets[transfers[index].id],
-                  let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize
-            else { continue }
-            transfers[index].bytesDone = UInt64(size)
+            let id = transfers[index].id
+            if let url = downloadTargets[id],
+               let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize {
+                transfers[index].bytesDone = UInt64(size)
+            }
+            pollUploadProgress(transferID: id)
+        }
+    }
+
+    /// 用另一条只复用、不认证的 sftp 查询远端目标大小。上一轮没结束时直接跳过，避免慢网络上堆积进程。
+    private func pollUploadProgress(transferID: UUID) {
+        let now = Date()
+        guard uploadProgressRunners[transferID] == nil,
+              lastUploadProgressPoll[transferID].map({ now.timeIntervalSince($0) >= 1 }) ?? true,
+              let target = uploadTargets[transferID],
+              let session,
+              session.isMultiplexReady
+        else { return }
+
+        lastUploadProgressPoll[transferID] = now
+        let runner = SFTPRunner()
+        uploadProgressRunners[transferID] = runner
+        let command = SFTPCommandBuilder.list(directory: target.path)
+        let plan = SFTPCommandBuilder.makePlan(config: host, controlPath: session.controlPath)
+        runner.start(plan: plan, commands: [command], timeout: 5) { [weak self, weak runner] outcome in
+            guard let self,
+                  let runner,
+                  self.uploadProgressRunners[transferID] === runner
+            else { return }
+            self.uploadProgressRunners.removeValue(forKey: transferID)
+
+            guard let output = outcome.outputs.first ?? nil,
+                  let entry = SFTPListingParser.parse(
+                      output,
+                      directory: RemotePath.parent(of: target.path)
+                  ).first(where: { $0.path == target.path }),
+                  var currentTarget = self.uploadTargets[transferID],
+                  let bytesDone = currentTarget.probe.accept(remoteSize: entry.size)
+            else { return }
+
+            self.uploadTargets[transferID] = currentTarget
+            guard let index = self.transfers.firstIndex(where: {
+                $0.id == transferID && $0.state == .running
+            }) else { return }
+            self.transfers[index].bytesDone = bytesDone
         }
     }
 

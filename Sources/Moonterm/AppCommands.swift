@@ -130,6 +130,11 @@ struct AppCommands: Commands {
             }
             .keyboardShortcut("b", modifiers: [.command, .shift])
 
+            Button(appState.activeSidebar == .monitor ? "隐藏监控面板" : "显示监控面板") {
+                appState.toggleSidebar(.monitor)
+            }
+            .keyboardShortcut("b", modifiers: [.command, .option])
+
             Divider()
 
             Button("放大字号") {

@@ -51,6 +51,15 @@ swift run Moonterm          # 不打包运行
 6. 批处理命令不要加 sftp 的 `-` 前缀；默认“一错即退”的退出码才是可信失败信号。
 7. 配置写盘统一走 `SecureFile`（原子写 + `0600`）。`hosts.json` 带 `version`，结构变化必须兼容迁移；v1 没有 `groups` 字段。
 
+### 监控采集
+
+1. 采集脚本从 **stdin** 灌给远端的 `sh -s`，不要拼进 ssh 的远端命令行（引号要为本地 argv 与远端登录 shell 各转义一遍，而登录 shell 未必是 `sh`）。
+2. 指标只读 `/proc` 加 `df -kP`，不装 agent、不依赖 `top` / `free` / `vmstat` 的输出格式。只支持 Linux 远端是已定范围，不要加 BSD 分支。
+3. 分帧靠 `#m:end` **整行相等**。`RemoteMetricsScript.Section` 的 `rawValue` 会出现在远端输出里，改它必须同时改 `RemoteMetricsParser`。
+4. 时间轴用 `/proc/uptime`，不要换成 `date +%s`：前者单调、精度 0.01 秒，变小正好用来发现远端重启。
+5. CPU 占用、网络速率算不出来时（第一帧、时间差 ≤ 0、计数器变小）必须给 `nil`，不要回填 0 或取绝对值。
+6. 面板收起 / 切 tab / 关 tab 都必须停流（`HostMonitor.deactivate()`、`MonitorSidebarView` 的 `.id(tab.id)`、`AppState.discardMonitor`）—— 这条流是持续吃流量的，不能在后台留着。
+
 ## 已定决策
 
 - 密码明文存入权限为 `0600` 的 `secrets.json` 是用户明确选择。除非用户重新提出，不要改成 Keychain，也不要反复劝告。
@@ -64,6 +73,8 @@ SFTP 的引号、输出格式和批处理分帧可由 `SFTPRunnerLocalTests` 通
 ```bash
 printf 'ls -lan "/tmp"\n' | sftp -q -b - -D /usr/libexec/sftp-server
 ```
+
+监控采集同理：`RemoteMetricsScript.script(procRoot:)` 把 `/proc` 指到临时目录、用本机 `/bin/sh` 当远端 shell，`RemoteMetricsStreamLocalTests` 就把起进程、分帧、解析、差分整条链路验完了。假 `/proc` 文件必须以换行结尾，否则分节标记会和上一行粘在一起。
 
 认证与 ControlMaster 复用仍需真实 sshd。若临时使用本机 `127.0.0.1` sshd，完成后清理临时密钥和对应 `known_hosts` 条目；不要用会覆盖 `known_hosts.old` 的 `ssh-keygen -R`。
 

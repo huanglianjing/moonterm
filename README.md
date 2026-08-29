@@ -4,7 +4,7 @@ macOS 原生 SSH 客户端。Swift + SwiftUI + AppKit，顶部多 tab，同时�
 
 ## 功能
 
-**侧边栏**：最左边一条常驻功能竖栏（类似 VS Code），两个图标 —— 主机、文件。点开在右边展开对应面板并占布局空间（终端跟着被挤窄并 reflow），边缘可拖着改宽度，宽度和上次展开的是哪个面板都记住。
+**侧边栏**：最左边一条常驻功能竖栏（类似 VS Code），三个图标 —— 主机、文件、监控。点开在右边展开对应面板并占布局空间（终端跟着被挤窄并 reflow），边缘可拖着改宽度，宽度和上次展开的是哪个面板都记住。
 
 **主机面板**（`⌘B`）
 
@@ -21,8 +21,16 @@ macOS 原生 SSH 客户端。Swift + SwiftUI + AppKit，顶部多 tab，同时�
 - 树根是当前目录而不是 `/`；顶部面包屑可跳转，右键目录可「作为根目录打开」
 - 单击目录展开、单击文件只选中 —— 双击文件不会开始下载
 - 下载走右键菜单（文件夹用 `get -rp`）；上传点标题栏按钮或目录右键菜单，可多选、可传整个文件夹（`put -rp`），落点是当前选中的目录
-- 底部传输区：下载有百分比，上传只显示「传输中」（原因见下）；可取消、可清除已完成，同时最多两个，其余排队
+- 底部传输区：普通文件上传、下载都有百分比；目录传输显示不确定进度；可取消、可清除已完成，同时最多两个，其余排队
 - `…` 菜单：显示隐藏文件（只是过滤，不重新列目录）、跟随终端目录
+
+**监控面板**（`⌥⌘B`）：当前 tab 那台主机的 CPU / 内存 / 磁盘 / 负载 / 网络，只读 `/proc` 和跑 `df`，远端不用装任何东西。
+
+- 同样复用终端那条已连上的 ssh 连接，不会再问密码
+- CPU / 内存 / 负载 / 网络画小折线（从右往左长出来，最近 120 次采样）；网络下载与上传分成两块，各自显示当前速率和历史峰值
+- 磁盘不画折线（两秒一采的曲线是条直线），每个挂载点一条占比条；根分区排最前，其余按使用率从高到低最多留 4 条；到 90% 变红并加警示图标
+- 采样间隔可选 1 / 2 / 5 秒，也能暂停（暂停不清历史）；**面板收起就停止采样**，不在后台偷跑
+- 只支持 Linux 远端（指标全在 `/proc` 里）；远端没有 `/proc` 时面板直接说明，不空着让人以为是坏了
 
 **Tab 与分栏**
 
@@ -50,6 +58,7 @@ macOS 原生 SSH 客户端。Swift + SwiftUI + AppKit，顶部多 tab，同时�
 | `⌘T` | 在当前分栏新建窗口（同主机，多一个小标签） |
 | `⌘B` | 显示 / 隐藏主机面板 |
 | `⇧⌘B` | 显示 / 隐藏文件面板 |
+| `⌥⌘B` | 显示 / 隐藏监控面板 |
 | `⌘W` | 关闭当前窗口（tab 里只有一个时就是关闭标签页） |
 | `⇧⌘W` | 关闭 App 窗口（系统菜单项，被挪到这里给 `⌘W` 腾位置） |
 | `⌘R` | 重新连接（当前分栏） |
@@ -116,9 +125,31 @@ FileSidebarView ─ RemoteFileBrowser ─ SFTPRunner ─ /usr/bin/sftp ─┐
 
 三条已知限制：
 
-- **上传没有百分比**：sftp 的进度条只在 stdout 是 tty 时输出，批处理模式下一个字都没有。下载的百分比是自己算的（本地落地文件多大 ÷ 远端说它多大），上传没有对应的东西可量
+- **传输百分比**：sftp 批处理模式没有进度事件，下载用本地落地文件大小推算，普通文件上传则通过当前会话的 ControlMaster 定时查询远端目标大小；目录传输无法用单个大小可靠表示，保持不确定进度
 - **当前目录只能猜**：ssh 是被 PTY 包起来的黑盒，只能看远端主动吐出的 OSC 7 或标题；两样都不发时停在家目录
 - **ssh-agent 用不上**：`SSH_AUTH_SOCK` 不在 SwiftTerm 传给子进程的环境里，密钥认证只能靠 `~/.ssh` 下的文件
+
+### 监控采集
+
+监控面板不装 agent、也不每隔两秒起一次 ssh，而是**常驻一条流**：
+
+```
+MonitorSidebarView ─ HostMonitor ─ RemoteMetricsStream ─ /usr/bin/ssh ─┐
+                                                                      ├─ 同一条 ssh 连接
+终端 SSHTerminalView ─ PTY ─ /usr/bin/ssh ─ ControlMaster socket ──────┘
+```
+
+- 复用方式和 sftp 完全一样（`ControlMaster=no` + 同一个 socket + `BatchMode=yes`），另加 `-T`：只要一条干净的字节流，不要 tty
+- 远端命令只有 `sh -s`，**脚本从 stdin 灌进去**（`RemoteMetricsScript`）。脚本里全是引号和 `$`，拼进命令行就得为「本地 argv → 远端登录 shell」逐层转义两遍，而登录 shell 还可能是 csh 或 fish
+- 脚本自己循环：`while :; do 读一圈 /proc; df -kP; echo '#m:end'; sleep N; done`。于是只握手一次，采样间隔由远端的 `sleep` 决定，不受本地调度和网络抖动影响
+- 本地按 `#m:end` 这一行分帧（`RemoteMetricsStream`），逐帧解析（`RemoteMetricsParser`）。某一节坏了只丢那一节，不会让图断一格
+- 时间轴取 `/proc/uptime` 而不是 `date +%s`：它是单调的（不被改系统时间或 NTP 跳秒带偏），精度 0.01 秒；变小就说明远端重启了，那时清掉历史重新开始
+- CPU 占用和网络速率都是**两帧之差**（`HostMetricsFrame.sample(previous:)`）：第一帧、时间差为 0、计数器变小时一律给 nil，不回填 0 —— 图上凭空的一段平地比一段空白更难发现问题
+- 内存已用取 `MemTotal - MemAvailable`（不是 `- MemFree`）：Linux 把空闲内存全拿去当页缓存，按 free 算永远是 99%
+- CPU 的 `iowait` 算闲着：那段时间 CPU 真没在算东西，等的是磁盘；算进忙的话一台在拷文件的机器会显示满载
+- 网络排掉 `lo` 与 `docker*` / `veth*` / `br-*` 这些虚拟口，剩下的相加：容器宿主上它们会把同一份流量再数一遍
+
+整条链路（起进程 → 灌脚本 → 分帧 → 解析 → 差分）都能在本机验证，不需要远端：`RemoteMetricsScript.script(procRoot:)` 可以把 `/proc` 指到一个装了假 `stat` / `meminfo` 的临时目录，让本机 `/bin/sh` 当远端 shell（见 `RemoteMetricsStreamLocalTests`）。
 
 ### Tab 与分栏
 
@@ -150,6 +181,8 @@ Sources/MoontermCore/         纯逻辑，无 UI 依赖，有单测覆盖
   Models/TerminalTab.swift    一个 tab = 一台主机 + 分栏树 + 窗口编号 + 聚焦的会话
   Models/RemotePath.swift     远端 POSIX 路径的拼接/拆解（不走 URL 那套本地文件系统规矩）
   Models/RemoteFileEntry.swift  远端目录里的一项（类型 / 大小 / 权限 / 时间原文）
+  Models/HostMetrics.swift    一帧原始读数（/proc 的累计计数）+ 两帧差分出来的一格样本
+  Models/MetricHistory.swift  定长滑动历史（小折线图的数据源）
   Store/ConfigStore.swift     配置持久化（原子写 + 0600）、分组增删改、拖动排序
   Store/SecretStore.swift     密码存取抽象 + 明文实现
   SSH/SSHCommandBuilder.swift ssh argv/env 构造（含 ControlMaster socket）
@@ -159,6 +192,10 @@ Sources/MoontermCore/         纯逻辑，无 UI 依赖，有单测覆盖
   SSH/SFTPListingParser.swift   解析 sftp `ls -lan` 的输出
   SSH/RemoteCwdParser.swift     从 OSC 7 / xterm 标题里猜远端当前目录
   SSH/SFTPRunner.swift          跑一次 sftp（进程、超时、取消；一次性对象）
+  SSH/RemoteShellCommandBuilder.swift  在远端跑一段 shell 脚本的 ssh argv（脚本走 stdin）
+  SSH/RemoteMetricsScript.swift  监控采集脚本（远端自己循环）+ 分帧标记
+  SSH/RemoteMetricsParser.swift  解析 /proc 与 df -kP 的输出
+  SSH/RemoteMetricsStream.swift  跑一条常驻采集流（起进程、按帧交付、停）
 
 Sources/Moonterm/             App 本体
   MoontermApp.swift           入口
@@ -173,6 +210,9 @@ Sources/Moonterm/             App 本体
   UI/HostSidebarDrag.swift    主机面板的拖拽状态、落点判定与插入线（和 tab / 分栏那套分开）
   UI/FileSidebarView.swift    竖栏展开的文件面板（面包屑 / 文件树 / 传输区）
   UI/RemoteFileBrowser.swift  文件面板的状态：看哪个目录、展开了哪几支、传输队列（一个 tab 一份）
+  UI/MonitorSidebarView.swift 竖栏展开的监控面板（折线 / 占比条 / 配色与数字格式）
+  UI/HostMonitor.swift        监控面板的状态：采集流、滑动历史、暂停与间隔（一个 tab 一份）
+  UI/SidebarPlaceholder.swift 没有打开的连接时，文件面板与监控面板共用的占位
   UI/PaneTreeView.swift       分栏树渲染、分割线、分栏标题栏（窗口小标签 + 新建）
   UI/DragController.swift     tab 与分栏的拖拽状态与落点判定
   UI/DropIndicatorOverlay.swift  拖拽时的落点高亮与幽灵
@@ -181,11 +221,3 @@ Sources/Moonterm/             App 本体
 
 Sources/MoontermAskpass/      SSH_ASKPASS 助手（独立可执行文件）
 ```
-
-## 尚未支持
-
-- 认证：私钥认证的 UI（留空密码时 ssh 仍会走 `~/.ssh` 下的密钥，但用不了 agent）、配置登录密钥
-- 连接：本地 shell、端口转发、登录后自动执行的命令、会话监控
-- 外观：主题配色、字体与字号调整、界面尺寸比例调整（4K / 1080p 都要看）
-- 设置：左下角设置页面（`⌘,` 打开）、快捷键自定义、配置文件导出导入、加号悬停显示快捷键提示
-- 发布：程序图标、上架 App Store

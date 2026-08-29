@@ -53,6 +53,9 @@ final class AppState: ObservableObject {
     /// tab 关掉就跟着扔掉。
     private var fileBrowsers: [UUID: RemoteFileBrowser] = [:]
 
+    /// 监控面板的采样状态，同样一个 tab 一份、跟着 tab 一起扔（里面还挂着一条常驻采集流）。
+    private var hostMonitors: [UUID: HostMonitor] = [:]
+
     private static let fontSizeKey = "terminalFontSize"
     private static let sidebarWidthKey = "sidebarWidth"
     private var sessionObservations: [UUID: AnyCancellable] = [:]
@@ -296,6 +299,7 @@ final class AppState: ObservableObject {
         for tab in tabs where tab.id != tabID {
             tab.sessionIDs.forEach { destroySession($0) }
             fileBrowsers.removeValue(forKey: tab.id)
+            discardMonitor(of: tab.id)
         }
         tabs.removeAll { $0.id != tabID }
         selectedTabID = tabID
@@ -308,6 +312,8 @@ final class AppState: ObservableObject {
         sessions.removeAll()
         tabs.removeAll()
         fileBrowsers.removeAll()
+        hostMonitors.values.forEach { $0.deactivate() }
+        hostMonitors.removeAll()
         selectedTabID = nil
         sessionBeingRenamed = nil
     }
@@ -354,6 +360,7 @@ final class AppState: ObservableObject {
         let removed = tabs.remove(at: index)
         // 文件面板的浏览状态跟 tab 同生死（里面还挂着没传完的 sftp 进程，扔掉时会一起掐掉）。
         fileBrowsers.removeValue(forKey: removed.id)
+        discardMonitor(of: removed.id)
         guard selectedTabID == removed.id else { return }
         // 优先选右边那个，没有就选左边。
         let fallback = min(index, tabs.count - 1)
@@ -580,6 +587,20 @@ final class AppState: ObservableObject {
         let browser = RemoteFileBrowser(host: tab.host)
         fileBrowsers[tab.id] = browser
         return browser
+    }
+
+    /// 某个 tab 的监控面板状态，第一次要用时才建。挂在 tab 上的理由同 `fileBrowser(for:)`。
+    func hostMonitor(for tab: TerminalTab) -> HostMonitor {
+        if let existing = hostMonitors[tab.id] { return existing }
+        let monitor = HostMonitor(host: tab.host)
+        hostMonitors[tab.id] = monitor
+        return monitor
+    }
+
+    /// 扔掉一个 tab 的监控状态。**先停流**：面板已经不在视图层级里了，`onDisappear` 不会再来，
+    /// 光丢引用的话那条 ssh 会一直采到对象被释放为止。
+    private func discardMonitor(of tabID: UUID) {
+        hostMonitors.removeValue(forKey: tabID)?.deactivate()
     }
 
     /// 拖面板右边缘。宽度夹在上下限之间：太窄看不清主机名，太宽把终端挤没了。
